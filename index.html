@@ -48,14 +48,13 @@
                 </button>
                 <div class="collapse navbar-collapse" id="navbarSupportedContent">
                     <ul class="navbar-nav me-auto mb-2 mb-lg-0">
-                        <!-- <li class="nav-item"> -->
-                          <a class="nav-link active" aria-current="page" target="_blank" href="https://sites.google.com/view/aeargroup/home">by Flight Logistics unit</a> <a href="https://liu.se" target="_blank" class="nav-link active" aria-current="page">@ Linköping University</a>
-                        <!-- </li> -->
+                        <a class="nav-link active" aria-current="page" target="_blank" href="https://sites.google.com/view/aeargroup/home">by Flight Logistics unit</a>
+                        <a href="https://liu.se" target="_blank" class="nav-link active" aria-current="page">@ Linköping University</a>
                   </ul>
                 </div>
             </div>
         </nav>
-</header>
+    </header>
 
     <!--Total statistics section-->
     <section class="mb-0 ps-5 pe-5">
@@ -67,7 +66,6 @@
                       <div id="spinner-container" style="display: none;">
                           <div class="d-flex align-items-center">
                               <strong>Computing...</strong>
-
                           </div>
                       </div>
                   </th>
@@ -132,6 +130,10 @@
                 <div class="col">
                     <div id="extension-slider" class=""></div>
                 </div>
+                <!-- NEW: Other UAV density slider -->
+                <div class="col">
+                    <div id="other-uav-density-slider" class=""></div>
+                </div>
             </div>
             <div class="row border-bottom">
                 <div class="col">NMAC distance (m) <sup><i class="fa-regular fa-circle-question" data-bs-toggle="tooltip" title="The horizontal distance between two aircraft which is considered to be the threshold for Near Mid-Air Collision (NMAC)."></i></sup></div>
@@ -139,6 +141,8 @@
                 <div class="col">Mission altitude (m) <sup><i class="fa-regular fa-circle-question" data-bs-toggle="tooltip" title="Mission altitude defines the width of the ground risk buffer (in accordance with 1:1 rule from EASA's AMC/GM to EU Regulation 2021/947). This slider sets the default altitude of waypoints and does not affect waypoints that have manually changed altitude."></i></sup></div>
                 <div class="col"></div>
                 <div class="col">Flyaway distance (m)</div>
+                <!-- NEW: label for density slider -->
+                <div class="col">Other UAV density (UAV/km²)</div>
             </div>
         </div>
     </section>
@@ -233,14 +237,12 @@
             <div class="col"><h2>UAV Quantitative Risk Assessment Tool</h2></div>
         </div>
         <div class="row">
-            <!-- <div class="col"> -->
-                <div>
-                    <a class="nav-link active footer-link" aria-current="page" target="_blank" href="https://sites.google.com/view/aeargroup/home">&copy; <span id="currentYear"></span> Flight Logistics unit</a>
-                    <a class="nav-link active footer-link" aria-current="page" target="_blank" href="https://liu.se">@ Linköping University</a>
-                    <hr>
-                    <div> For all questions contact <a href="mailto:leonid.sedov@liu.se">leonid.sedov@liu.se</a>.</div>
-                </div>
-            <!-- </div> -->
+            <div>
+                <a class="nav-link active footer-link" aria-current="page" target="_blank" href="https://sites.google.com/view/aeargroup/home">&copy; <span id="currentYear"></span> Flight Logistics unit</a>
+                <a class="nav-link active footer-link" aria-current="page" target="_blank" href="https://liu.se">@ Linköping University</a>
+                <hr>
+                <div> For all questions contact <a href="mailto:leonid.sedov@liu.se">leonid.sedov@liu.se</a>.</div>
+            </div>
         </div>
     </footer>
 

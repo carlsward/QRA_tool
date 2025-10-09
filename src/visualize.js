@@ -50,7 +50,8 @@ let workersUrl = './src/workers.js';
 // Names of the map layers
 const Layers = {
     Ground: "Ground risk",
-    Air: "Air risk"
+    Air: "Air risk",
+    Drone: "Drone (beta)" // NEW
 }
 
 /**
@@ -96,6 +97,7 @@ class Visualization {
     #speedSlider;
     #extensionSlider;
     #globalAltitudeSlider;
+    #otherUavDensitySlider;   // NEW
 
     #population;
     #timeoutId;
@@ -105,6 +107,9 @@ class Visualization {
 
     #selectedArea;
     #dataUrl;
+
+    // NEW: current mode (false = vanlig Air-risk mot GA, true = Drone–Drone)
+    #droneMode;
 
     constructor(selected_area) {
         this.#selectedArea = selected_area;
@@ -128,6 +133,7 @@ class Visualization {
         this.#NMAC_radius = 50;
         this.#segmentExtensionLength = 100;
         this.#v_UA = 8.34;  // m/s
+        this.#droneMode = false; // default = Air risk
 
         this.#populationElement = document.getElementById("population");
         this.#lengthElement = document.getElementById("length");
@@ -140,7 +146,6 @@ class Visualization {
         this.#segmentsExtensionCheckbox = document.getElementById("segment-extension");
         this.#spinnerContainer = document.getElementById('spinner-container');
 
-
         this.#population = null;  // population data in geojson format.
         this.#timeoutId = null;  // used for debouncing method call
         this.#ongoingComputation = 0;
@@ -148,7 +153,7 @@ class Visualization {
         this.#rtreeData = null;
 
         // setting current year at footer
-        document.getElementById("currentYear").textContent = new Date().getFullYear();;
+        document.getElementById("currentYear").textContent = new Date().getFullYear();
 
         // running initialization methods
         this.#initializeData();
@@ -158,28 +163,22 @@ class Visualization {
         this.#initializeEdgeExtensionSlider();
         this.#initializeUavSpeedSlider();
         this.#initializeGlobalAltitudeSlider();
+        this.#initializeOtherUavDensitySlider(); // NEW
         this.#initializeSegmentExtensionCheckbox();
         this.#computeTotalStatistics();
     }
 
     /* ---------- Methods - private ---------- */
 
-    /**
-    * getDataUrlByAreaName method:
-    *   Returns an appropriate link to the data 
-    */
-
-    #getDataUrlByAreaName(area_name) {
-
-    }
+    #getDataUrlByAreaName(area_name) {}
 
     async #initializeData() {
         let promise = new Promise((resolve, reject) => {
-           $.getJSON(this.#dataUrl, function(data, status, xhr) {
+           $.getJSON(this.#dataUrl, function(data, status) {
                 if (status === 'success') {
                     resolve(data);
                 } else {
-                    reject(error);
+                    reject(new Error('Failed to load population data'));
                 }
            })
         });
@@ -217,13 +216,23 @@ class Visualization {
             attribution: '&copy <a href="http://openstreetmap.org">OpenStreetMap</a> &copy; <a href="https://www.lantmateriet.se/en/">Lantmäteriet</a>'
         });
 
+        // NEW: Drone layer shares samma bakgrund som air/ground
+        let droneLayer = L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+            maxZoom: 20,
+            attribution: '&copy <a href="http://openstreetmap.org">OpenStreetMap</a> &copy; <a href="https://www.lantmateriet.se/en/">Lantmäteriet</a>'
+        });
+
         this.#map = L.map('map', {
             doubleClickZoom: false,
             preferCanvas: true,
             layers: [groundLayer]
         }).setView(dataViews[this.#selectedArea], dataZoomLevels[this.#selectedArea]);
 
-        let layerControl = L.control.layers({[Layers.Ground]: groundLayer, [Layers.Air]: airLayer}, null, {collapsed: false}).addTo(this.#map);
+        let layerControl = L.control.layers(
+            { [Layers.Ground]: groundLayer, [Layers.Air]: airLayer, [Layers.Drone]: droneLayer },
+            null,
+            { collapsed: false }
+        ).addTo(this.#map);
 
         let groundGeoJSONLayer = L.geoJSON(this.#population, {style: Helpers.groundStyling}).addTo(this.#map);
         let airGeoJSONLayer = L.geoJSON(this.#population, {style: Helpers.airStyling});
@@ -234,21 +243,32 @@ class Visualization {
 
         // Add a listener to the 'baselayerchange' event
         this.#map.on('baselayerchange', function (e) {
-            // Check which base layer was selected
             if (e.name === Layers.Ground) {
+                this.#droneMode = false;
                 airGeoJSONLayer.remove();
                 this.#airBuffersUnionGeoJsonLayers.remove();
                 this.#edgesGeoJsonLayersList.remove();
                 groundGeoJSONLayer.addTo(this.#map);
                 this.#groundBuffersUnionGeoJsonLayers.addTo(this.#map);
                 this.#edgesGeoJsonLayersList.addTo(this.#map);
-            } else {
+            } else if (e.name === Layers.Air) {
+                this.#droneMode = false;
                 groundGeoJSONLayer.remove();
                 this.#groundBuffersUnionGeoJsonLayers.remove();
                 this.#edgesGeoJsonLayersList.remove();
                 airGeoJSONLayer.addTo(this.#map);
                 this.#airBuffersUnionGeoJsonLayers.addTo(this.#map);
                 this.#edgesGeoJsonLayersList.addTo(this.#map);
+                this.#recomputeEdgesDebounced(this.#edgesList);
+            } else if (e.name === Layers.Drone) {
+                this.#droneMode = true;
+                groundGeoJSONLayer.remove();
+                this.#groundBuffersUnionGeoJsonLayers.remove();
+                this.#edgesGeoJsonLayersList.remove();
+                airGeoJSONLayer.addTo(this.#map); // vi visar samma stil som Air
+                this.#airBuffersUnionGeoJsonLayers.addTo(this.#map);
+                this.#edgesGeoJsonLayersList.addTo(this.#map);
+                this.#recomputeEdgesDebounced(this.#edgesList);
             }
         }.bind(this));
 
@@ -260,7 +280,6 @@ class Visualization {
     *   Destroys the map so that the widget can be reinitialized.
     */
     deinitializeMap() {
-        // this.#map.off();
         if(this.#map != undefined) {
             this.#map.remove();
         }
@@ -309,10 +328,9 @@ class Visualization {
             this.#edgesList.push(edge);
             this.#updateBuffersUnion("ground");
             this.#updateBuffersUnion("air");
-            this.#computeRisks([edge]);
+            this.#recomputeEdges([edge]); // was: this.#computeRisks([edge]);
         }
     }
-    // onMapDoubleClick(event) {this.#onMapDoubleClick(event)}
 
     /**
     * nodeOnEvent method:
@@ -322,7 +340,7 @@ class Visualization {
         node.smoothCheckboxElement.addEventListener('change', (event) => {
             if (node.hasEdge()) {
                 this.#updateBuffersUnion("ground");
-                this.#computeRisks([node.edge]);
+                this.#recomputeEdges([node.edge]);
             }
         })
 
@@ -331,12 +349,12 @@ class Visualization {
 
             // if the node has an incoming edge that is smooth, and an outgoing edge, update population of both
             if (node.hasEdge() && node.edgesList.length === 2 && node.edgesList[0].nodesList[0].isSmooth) {
-                this.#computeRisks(node.edgesList);
+                this.#recomputeEdges(node.edgesList);
             // last node without own edge, but incoming edge is smooth
             } else if (!node.hasEdge() && node.edgesList.length === 1 && node.edgesList[0].nodesList[0].isSmooth) {
-                this.#computeRisks(node.edgesList);
+                this.#recomputeEdges(node.edgesList);
             } else if (node.hasEdge()) {
-                this.#computeRisks([node.edge]);
+                this.#recomputeEdges([node.edge]);
             }
         })
 
@@ -347,16 +365,14 @@ class Visualization {
         node.marker.on('moveend', (event) => {
                 this.#updateBuffersUnion("ground");
                 this.#updateBuffersUnion("air");
-                this.#computeRisks(node.edgesList);
+                this.#recomputeEdges(node.edgesList);
                 })
     }
 
     /**
     * splitEdge method:
     *   When a node's edge is split into two edges, a new node is added in the middle
-    *   of that edge, making the original edge an edge between original source node and
-    *   and the new node, and it creates a new edge between the new node and the original
-    *   destination node of the original edge.
+    *   of that edge...
     */
     #splitEdge(node) {
         if (node.hasEdge()) {
@@ -390,7 +406,7 @@ class Visualization {
             this.#edgesList.splice(node.edge.positionInList+1, 0, newEdge);
             this.#updateBuffersUnion("ground");
             this.#updateBuffersUnion("air");
-            this.#computeRisks([node.edge, newEdge]);
+            this.#recomputeEdges([node.edge, newEdge]);
 
             this.#nodesList.slice(node.positionInList+2, this.#nodesList.length).map((node) => {node.positionInList += 1});
             this.#edgesList.slice(node.edge.positionInList+2, this.#edgesList.length).map((edge) => {edge.positionInList += 1})
@@ -401,10 +417,6 @@ class Visualization {
 
     /**
     * removeNode method:
-    *   When a user clicks the remove button of a node's popup, the node itself
-    *   and its outgoing edge (if it has one) are removed. In the case of the last
-    *   node, its incoming edge is removed. In the case of a node with both incoming
-    *   and outgoing edge, the incoming edge is updated.
     */
     #removeNode(node) {
         if (node.hasEdge() && node.edgesList.length === 1) {
@@ -420,7 +432,7 @@ class Visualization {
             this.#segmentsTableElement.querySelector('tbody').deleteRow(0);
             this.#updateBuffersUnion("ground");
             this.#updateBuffersUnion("air");
-            this.#computeRisksDebounced([]);
+            this.#recomputeEdgesDebounced([]);
             this.#edgesList.map((edge) => {this.#addSegmentRow(edge)});
 
         } else if (!node.hasEdge() && node.edgesList.length === 1) {
@@ -436,7 +448,7 @@ class Visualization {
             this.#segmentsTableElement.querySelector('tbody').deleteRow(this.#edgesList.length);
             this.#updateBuffersUnion("ground");
             this.#updateBuffersUnion("air");
-            this.#computeRisksDebounced([]);
+            this.#recomputeEdgesDebounced([]);
 
         } else if (node.edgesList.length === 2){
             this.#nodesList.splice(node.positionInList, 1);
@@ -457,7 +469,7 @@ class Visualization {
 
             this.#updateBuffersUnion("ground");
             this.#updateBuffersUnion("air");
-            this.#computeRisks([source.edge]);
+            this.#recomputeEdges([source.edge]);
             this.#edgesList.slice(node.edge.positionInList, this.#edgesList.length).map((edge) => {this.#addSegmentRow(edge)});
         }
     }
@@ -491,24 +503,11 @@ class Visualization {
 
     /**
     * unionOfBuffers method:
-    *   Method for computing the union of all edge's buffers
     */
     #unionOfBuffers(buffersList) {
         let coords = this.#nodesList.map((node) => {return Object.values(node.point.geometry.coordinates.toReversed())});
         console.log('nodesCoordinates: ', JSON.stringify(coords, null, 2));
-        // console.log('nodesCoordinates: ', this.#nodesList.map((node) => {return node.point.geometry.coordinates.reverse()}));
         if (this.#edgesList.length > 0) {
-        // Uncomment this section to test bugs
-//            try {
-//                let union = buffersList[0];
-//
-//                for (let buffer of buffersList) {
-//                    union = turf.union(union, buffer);
-//                }
-//            } catch (error){
-//                console.log(error)
-//            }
-
             let union = polyclip.union(...buffersList.map((buffer) => buffer.geometry.coordinates));
             return turf.buffer(turf.multiPolygon(union), 0.0001, {units: 'meters'});
         }
@@ -517,23 +516,33 @@ class Visualization {
 
     /**
     * computeRisksDebounced method:
-    *   Method for debouncing the call to `#computeRisks` by one sec.
-    *   That is the last call only to this method within a second is considered.
     */
     #computeRisksDebounced(edges) {
-        // Clear the previous timer (if any)
         clearTimeout(this.#timeoutId);
-
-        // Set a new timer to call computeRisks after a delay
         this.#timeoutId = setTimeout(() => { this.#computeRisks(edges); }, 1000);
     }
 
     /**
-    * computeRisks method:
-    *   Method that computes the population number intersected by the full route
-    *   as well as the population number intersected by an edge among the given edges list `edges`,
-    *   which can contain zero, one or two edges. The method also finds the terms needed for computing the
-    *   NMAC prob for each edge.
+    * Helper: central dispatch – kör rätt beräkning beroende på läge
+    */
+    #recomputeEdges(edges) {
+        if (this.#droneMode) {
+            this.#computeDroneRisk();  // ignorerar 'edges' – snabbt ändå
+        } else {
+            this.#computeRisks(edges);
+        }
+    }
+    #recomputeEdgesDebounced(edges) {
+        clearTimeout(this.#timeoutId);
+        if (this.#droneMode) {
+            this.#timeoutId = setTimeout(() => { this.#computeDroneRisk(); }, 500);
+        } else {
+            this.#timeoutId = setTimeout(() => { this.#computeRisks(edges); }, 1000);
+        }
+    }
+
+    /**
+    * computeRisks method (befintlig Air risk mot GA):
     */
     async #computeRisks(edges) {
         await this.#initializeData();
@@ -647,9 +656,59 @@ class Visualization {
     }
 
     /**
+    * NEW: Drone–Drone risk (konstant UAV-täthet från slidern)
+    *  - använder varje segments NMAC-korridorarea (airBufferArea)
+    *  - relativhastighet ~ 1.2 * egenhastighet (enkelt antagande)
+    *  - uppdaterar segmentens två blå kolumner och totals
+    */
+    #computeDroneRisk() {
+    // visa spinner konsekvent
+    if (this.#ongoingComputation < 1) this.#showSpinner();
+    this.#ongoingComputation++;
+
+    const lambda = Math.max(0, this.getOtherUavDensity()); // UAV per km²
+    const R = Math.max(1, this.#NMAC_radius);              // m
+    const Vrel = this.#v_UA * 1.2;                         // m/s (enkelt antagande)
+
+    let totalMissionNmac = 0;
+    let totalTime = 0;
+
+    for (let edge of this.#edgesList) {
+        const airG = Math.max(1, edge.airBufferArea);      // m² (skydd mot /0)
+        const areaKm2 = airG / 1e6;
+
+        // MVP-modell: kollisionsfrekvens ~ densitet * korridorarea * relativhastighet / (2R)
+        const ratePerSec = lambda * areaKm2 * (Vrel / (2 * R)); // [1/s]
+
+        // Sätt Edge-fälten via klassens egen metod:
+        // computeNMAC_rate(T_sum, v_GA_mean, partialProb)
+        // => rate = (2*R^2*T_sum*sqrt(v_UA^2+v_GA_mean^2)) / (R*airG) * partialProb
+        // Välj T_sum=1, v_GA_mean=0  => rate = (2*R*v_UA/airG) * partialProb
+        // => partialProb = ratePerSec * airG / (2*R*v_UA)
+        const T_sum = 1;                   // s
+        const v_GA_mean = 0;               // m/s
+        const partialProb = ratePerSec * airG / (2 * R * Math.max(0.001, this.#v_UA));
+
+        edge.computeNMAC_rate(T_sum, v_GA_mean, partialProb);
+
+        // för totals – använd vår ratePerSec direkt
+        totalMissionNmac += (edge.length / this.#v_UA) * ratePerSec;
+        totalTime += edge.length / this.#v_UA;
+
+        this.#addSegmentRow(edge);
+    }
+
+    // Totals (NMAC/1M flight hours, NMAC of mission)
+    const nmacPerHour = totalTime > 0 ? (totalMissionNmac * 3600 / totalTime) : 0;
+    this.#totalNMAC_rate = Math.ceil(nmacPerHour * 1e6);
+    this.#totalExpectedNMAC = totalMissionNmac;
+    this.#totalMissionDuration = totalTime;
+
+    this.#ongoingComputation--;
+    this.#computeTotalStatistics();
+}
+    /**
     * showSpinner method:
-    *   Method that displays a spinner in all the value cells of the totals table,
-    *   when the statistics are being computed, i.e. when `#computeRisks` is running.
     */
     #showSpinner() {
         this.#spinnerContainer.style.display = 'block';
@@ -658,12 +717,10 @@ class Visualization {
         for (let cell of cells) {
             cell.innerHTML = '<div class="spinner-grow spinner-grow-sm text-primary" role="status"></div>';
         }
-
     }
 
     /**
     * hideSpinner method:
-    *   Method that hides the `Computing...` text when `#computeRisks` has finished running.
     */
     #hideSpinner() {
       this.#spinnerContainer.style.display = 'none';
@@ -671,7 +728,6 @@ class Visualization {
 
     /**
     * doubleComputations method:
-    *   Method that finds and returns the twice computed population and ground area.
     */
     #doubleComputations() {
         let doubleComputedPopulation = 0;
@@ -689,7 +745,6 @@ class Visualization {
 
     /**
     * computeTotalStatistics method:
-    *   Computes the totals section statistics and updates the totals table.
     */
     #computeTotalStatistics() {
         let totalPopulationAtRisk = this.#edgesList.reduce((a, edge) => a + edge.population, 0);
@@ -721,8 +776,6 @@ class Visualization {
 
     /**
     * addSegmentRow method:
-    *   Adds a new row for the last created edge into the segments table,
-    *   or modifies the row content of an edge.
     */
     #addSegmentRow(edge) {
         let tableBody = this.#segmentsTableElement.querySelector('tbody')
@@ -774,7 +827,6 @@ class Visualization {
 
     /**
     * initializeNMAC_slider method:
-    *   Creates one slider for modifying air buffer radius of all edges simultaneously.
     */
     #initializeNMAC_slider() {
         this.#NMAC_Slider = document.getElementById('nmac-slider');
@@ -798,9 +850,6 @@ class Visualization {
 
     /**
     * onNMAC_sliderChange method:
-    *   Upon sliding nmac-slider, each edge's air buffer radius is changed
-    *   as well as the air buffer recomputed, the buffer union recomputed
-    *   and the stats updated.
     */
     #onNMAC_sliderChange(values, handle) {
         this.#NMAC_radius = Math.floor(values[handle]);
@@ -811,12 +860,11 @@ class Visualization {
         }
 
         this.#updateBuffersUnion("air");
-        this.#computeRisksDebounced(this.#edgesList);
+        this.#recomputeEdgesDebounced(this.#edgesList);
     }
 
     /**
     * initializeEdgeExtensionSlider method:
-    *   Creates one slider for modifying the edge extension length.
     */
     #initializeEdgeExtensionSlider() {
         this.#extensionSlider = document.getElementById('extension-slider');
@@ -840,8 +888,6 @@ class Visualization {
 
     /**
     * onEdgeExtensionSliderChange method:
-    *   Upon slider move, update `segmentExtensionLength` and if
-    *   checkbox is marked then update the edges.
     */
     #onEdgeExtensionSliderChange(values, handle) {
         this.#segmentExtensionLength = Math.floor(values[handle]);
@@ -850,7 +896,6 @@ class Visualization {
 
     /**
     * initializeUavSpeedSlider method:
-    *   Creates one slider for modifying the UAV speed, in km/h.
     */
     #initializeUavSpeedSlider() {
         this.#speedSlider = document.getElementById('uav-speed-slider');
@@ -873,18 +918,15 @@ class Visualization {
 
     /**
     * onUavSpeedSliderChange method:
-    *   Upon slider move, update drone speed for each edge and recompute nmac rates.
     */
     #onUavSpeedSliderChange(values, handle) {
         this.#v_UA = values[handle];
         this.#edgesList.map((edge) => {edge.v_UA = this.#v_UA})
-        this.#computeRisksDebounced(this.#edgesList);
+        this.#recomputeEdgesDebounced(this.#edgesList);
     }
 
-        /**
+    /**
     * initializeGlobalAltitudeSlider method:
-    *   Creates one slider for modifying the edge's altitudes globally.
-    *   Edges whose altitude is changed manually won't be affected.
     */
     #initializeGlobalAltitudeSlider() {
         this.#globalAltitudeSlider = document.getElementById('global-altitude-slider');
@@ -908,7 +950,6 @@ class Visualization {
 
     /**
     * onGlobalAltitudeSliderChange method:
-    *   Upon slider move, updates altitude for each edge whose altitude not manually changed.
     */
     #onGlobalAltitudeSliderChange(values, handle) {
         let newAltitude = values[handle];
@@ -930,7 +971,39 @@ class Visualization {
         }
 
         this.#updateBuffersUnion("ground");
-        this.#computeRisksDebounced(affectedEdges);
+        this.#recomputeEdgesDebounced(affectedEdges);
+    }
+
+    /**
+    * NEW: initializeOtherUavDensitySlider
+    */
+    #initializeOtherUavDensitySlider() {
+        this.#otherUavDensitySlider = document.getElementById('other-uav-density-slider');
+        if (!this.#otherUavDensitySlider) return;
+
+        if (!this.#otherUavDensitySlider.noUiSlider) {
+            noUiSlider.create(this.#otherUavDensitySlider, {
+                start: [0],
+                step: 0.1,
+                connect: 'lower',
+                tooltips: {
+                    to: (value) => Number(value).toFixed(1),
+                },
+                range: {
+                    'min': [0],
+                    'max': [5]
+                },
+            });
+        }
+        this.#otherUavDensitySlider.noUiSlider.on('change', () => this.#recomputeEdgesDebounced(this.#edgesList));
+    }
+
+    /**
+    * Getter för densitetsvärdet (UAV/km²).
+    */
+    getOtherUavDensity() {
+        if (!this.#otherUavDensitySlider || !this.#otherUavDensitySlider.noUiSlider) return 0;
+        return parseFloat(this.#otherUavDensitySlider.noUiSlider.get());
     }
 
     #initializeSegmentExtensionCheckbox() {
@@ -939,9 +1012,6 @@ class Visualization {
 
     /**
     * onSegmentExtensionCheckboxChange method:
-    *   When the segment extension checkbox is marked, each edge is
-    *   updated so that it is extended by a distance and its statistics
-    *   are updated as well.
     */
     #onSegmentExtensionCheckboxChange(event) {
         let extraLength = 0;
@@ -957,7 +1027,7 @@ class Visualization {
 
         this.#updateBuffersUnion("ground");
         this.#updateBuffersUnion("air");
-        this.#computeRisksDebounced(this.#edgesList);
+        this.#recomputeEdgesDebounced(this.#edgesList);
     }
 }
 

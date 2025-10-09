@@ -18,6 +18,8 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 /**
 * `script.js` file that can be loaded in a HTML file.
 */
+import { buildPopulationIndex, groundFromCorridor } from './src/ground_risk_area.js';
+import { droneRiskConstantDensity } from './src/drone_drone_risk.js';
 
 import { Visualization } from './src/visualize.js';
 
