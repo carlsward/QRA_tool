@@ -46,6 +46,8 @@ let dataZoomLevels = {
 }
 
 let workersUrl = './src/workers.js';
+let droneMapWorkerUrl = './src/drone_map_worker.js';
+
 
 // Names of the map layers
 const Layers = {
@@ -97,7 +99,14 @@ class Visualization {
     #speedSlider;
     #extensionSlider;
     #globalAltitudeSlider;
-    #otherUavDensitySlider;   // NEW
+    #otherUavDensitySlider;
+    #paxSlider;
+    #paxCount;
+    #droneMapValues;          // Float64 per ruta (m(g))
+    #droneMapGeoJSONLayer;    // Leaflet-lager för att visa m(g)
+    #droneMapMean;
+
+
 
     #population;
     #timeoutId;
@@ -110,6 +119,8 @@ class Visualization {
 
     // NEW: current mode (false = vanlig Air-risk mot GA, true = Drone–Drone)
     #droneMode;
+   
+
 
     constructor(selected_area) {
         this.#selectedArea = selected_area;
@@ -130,11 +141,14 @@ class Visualization {
         this.#totalNMAC_rate = 0;
         this.#totalExpectedNMAC = 0;
         this.#totalMissionDuration = 0;
-        this.#NMAC_radius = 50;
+        this.#NMAC_radius = 300;
         this.#segmentExtensionLength = 100;
         this.#v_UA = 8.34;  // m/s
         this.#droneMode = false; // default = Air risk
 
+        this.#paxCount = 1; // default: 1 passagerare (exponerar parametern utan antaganden)
+
+        
         this.#populationElement = document.getElementById("population");
         this.#lengthElement = document.getElementById("length");
         this.#areaElement = document.getElementById("area");
@@ -166,6 +180,10 @@ class Visualization {
         this.#initializeOtherUavDensitySlider(); // NEW
         this.#initializeSegmentExtensionCheckbox();
         this.#computeTotalStatistics();
+        this.#initializePaxSlider();
+        this.#initializeDroneMapControls(); // NEW: knapp för att bygga drone map
+
+
     }
 
     /* ---------- Methods - private ---------- */
@@ -197,6 +215,124 @@ class Visualization {
             }
         }
     }
+
+
+    #prepareGridIndexFromPopulation() {
+  const feats = this.#population.features;
+
+  // 1) Centroid för varje ruta
+  const cents = feats.map((f, idx) => {
+    const c = turf.centroid(f).geometry.coordinates; // [lon, lat]
+    return { idx, lon: c[0], lat: c[1], pop: f.properties.B || 0 };
+  });
+
+  // 2) Diskretisera till rader/kolumner via unika lat/lon
+  const round = (x) => +x.toFixed(6);
+  const uniq = (arr) => Array.from(new Set(arr.map(round))).sort((a,b)=>a-b);
+
+  const lons = uniq(cents.map(o => o.lon));
+  const lats = uniq(cents.map(o => o.lat));
+  const lon2c = new Map(lons.map((x,i)=>[x,i]));
+  const lat2r = new Map(lats.map((x,i)=>[x,i]));
+
+  // 3) Cell-objekt + lookup tabell
+  const cells = cents.map(o => {
+    const r = lat2r.get(round(o.lat));
+    const c = lon2c.get(round(o.lon));
+    return { id: o.idx, r, c, pop: o.pop };
+  });
+
+  const idByRC = {};
+  for (const cell of cells) idByRC[`${cell.r}|${cell.c}`] = cell.id;
+
+  // 4) Geometrier i samma indexordning som features
+  const polys = feats.map(f => f.geometry);
+
+  return { cells, idByRC, lats, lons, polys };
+}
+
+
+#buildDroneMap(mode = "sample") {
+  if (!this.#population) { console.warn('Population not loaded yet'); return; }
+
+  const { cells, idByRC, lats, lons, polys } = this.#prepareGridIndexFromPopulation();
+
+  if (this.#ongoingComputation < 1) this.#showSpinner();
+  this.#ongoingComputation++;
+
+  const worker = new Worker(droneMapWorkerUrl);
+  worker.postMessage({ cells, idByRC, lats, lons, polys, mode, samplePairs: 20000 });
+
+
+  worker.onmessage = (ev) => {
+    const msg = ev.data;
+    if (msg.type === 'progress') {
+  const pct = Math.round((msg.done / (msg.total || 1)) * 100);
+  console.log(`Drone map: ${msg.done}/${msg.total} (${pct}%)`);
+  return;
+}
+
+    if (msg.type === 'result') {
+      this.#droneMapValues = msg.mValues; // m(g)
+      // Beräkna ett robust medel (ignorera nollor) för normalisering
+      const nonZero = this.#droneMapValues.filter(v => v > 0);
+      this.#droneMapMean = nonZero.length ? (nonZero.reduce((a,c)=>a+c,0) / nonZero.length) : 1;
+
+      // Bädda m(g) in i en kopia av geojson för visualization
+      const styled = JSON.parse(JSON.stringify(this.#population));
+      for (let i = 0; i < styled.features.length; i++) {
+        styled.features[i].properties.m = this.#droneMapValues[i] || 0;
+      }
+
+      // Rita som svag värmekarta (syns bara i Drone-läget)
+      if (this.#droneMapGeoJSONLayer) this.#droneMapGeoJSONLayer.remove();
+      this.#droneMapGeoJSONLayer = L.geoJSON(styled, {
+        style: f => {
+          const v = f.properties.m || 0;
+          const a = Math.min(0.8, v > 0 ? (Math.log10(v+1)/6) : 0);
+          return { color: '#ff6600', weight: 1, fillOpacity: a, fillColor: '#ff6600' };
+        }
+      });
+      if (this.#droneMode) this.#droneMapGeoJSONLayer.addTo(this.#map);
+
+      this.#offerDroneMapDownload(styled);
+
+      this.#ongoingComputation--;
+      this.#computeTotalStatistics();
+      this.#hideSpinner();
+      worker.terminate();
+    }
+  };
+
+  worker.onerror = (err) => {
+  console.error('DroneMap worker error:', err.message || err);
+  this.#ongoingComputation = 0;
+  this.#hideSpinner();
+  worker.terminate();
+};
+
+worker.onmessageerror = (err) => {
+  console.error('DroneMap worker message error:', err);
+  this.#ongoingComputation = 0;
+  this.#hideSpinner();
+  worker.terminate();
+};
+
+}
+
+
+#offerDroneMapDownload(geojson) {
+  const a = document.getElementById('download-drone-map-link');
+  if (!a) return;
+  const blob = new Blob([JSON.stringify(geojson)], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  a.href = url;
+  a.download = 'drone_map.geojson';
+  a.style.display = 'inline';
+}
+
+
+
 
     /**
     * initializeMap method:
@@ -243,34 +379,62 @@ class Visualization {
 
         // Add a listener to the 'baselayerchange' event
         this.#map.on('baselayerchange', function (e) {
-            if (e.name === Layers.Ground) {
-                this.#droneMode = false;
-                airGeoJSONLayer.remove();
-                this.#airBuffersUnionGeoJsonLayers.remove();
-                this.#edgesGeoJsonLayersList.remove();
-                groundGeoJSONLayer.addTo(this.#map);
-                this.#groundBuffersUnionGeoJsonLayers.addTo(this.#map);
-                this.#edgesGeoJsonLayersList.addTo(this.#map);
-            } else if (e.name === Layers.Air) {
-                this.#droneMode = false;
-                groundGeoJSONLayer.remove();
-                this.#groundBuffersUnionGeoJsonLayers.remove();
-                this.#edgesGeoJsonLayersList.remove();
-                airGeoJSONLayer.addTo(this.#map);
-                this.#airBuffersUnionGeoJsonLayers.addTo(this.#map);
-                this.#edgesGeoJsonLayersList.addTo(this.#map);
-                this.#recomputeEdgesDebounced(this.#edgesList);
-            } else if (e.name === Layers.Drone) {
-                this.#droneMode = true;
-                groundGeoJSONLayer.remove();
-                this.#groundBuffersUnionGeoJsonLayers.remove();
-                this.#edgesGeoJsonLayersList.remove();
-                airGeoJSONLayer.addTo(this.#map); // vi visar samma stil som Air
-                this.#airBuffersUnionGeoJsonLayers.addTo(this.#map);
-                this.#edgesGeoJsonLayersList.addTo(this.#map);
-                this.#recomputeEdgesDebounced(this.#edgesList);
-            }
-        }.bind(this));
+  if (e.name === Layers.Ground) {
+    // Vi går till Ground-läget
+    this.#droneMode = false;
+
+    // DÖLJ drone-map-lagret om det finns
+    if (this.#droneMapGeoJSONLayer) this.#droneMapGeoJSONLayer.remove();
+
+    // Visa ground-lagren, dölj air-lagren
+    airGeoJSONLayer.remove();
+    this.#airBuffersUnionGeoJsonLayers.remove();
+    this.#edgesGeoJsonLayersList.remove();
+
+    groundGeoJSONLayer.addTo(this.#map);
+    this.#groundBuffersUnionGeoJsonLayers.addTo(this.#map);
+    this.#edgesGeoJsonLayersList.addTo(this.#map);
+
+  } else if (e.name === Layers.Air) {
+    // Vi går till Air-läget (UAV vs GA)
+    this.#droneMode = false;
+
+    // DÖLJ drone-map-lagret om det finns
+    if (this.#droneMapGeoJSONLayer) this.#droneMapGeoJSONLayer.remove();
+
+    // Visa air-lagren, dölj ground-lagren
+    groundGeoJSONLayer.remove();
+    this.#groundBuffersUnionGeoJsonLayers.remove();
+    this.#edgesGeoJsonLayersList.remove();
+
+    airGeoJSONLayer.addTo(this.#map);
+    this.#airBuffersUnionGeoJsonLayers.addTo(this.#map);
+    this.#edgesGeoJsonLayersList.addTo(this.#map);
+
+    // Räkna om med Air-risk
+    this.#recomputeEdgesDebounced(this.#edgesList);
+
+  } else if (e.name === Layers.Drone) {
+    // Vi går till Drone-läget (UAV–UAV)
+    this.#droneMode = true;
+
+    // Dölj ground-overlay, visa samma OSM-bakgrund/air-overlay
+    groundGeoJSONLayer.remove();
+    this.#groundBuffersUnionGeoJsonLayers.remove();
+    this.#edgesGeoJsonLayersList.remove();
+
+    airGeoJSONLayer.addTo(this.#map);                 // bakgrund (samma som Air)
+    this.#airBuffersUnionGeoJsonLayers.addTo(this.#map);
+    this.#edgesGeoJsonLayersList.addTo(this.#map);
+
+    // VISA drone-map-värmekartan om den finns (byggs via knappen/worker)
+    if (this.#droneMapGeoJSONLayer) this.#droneMapGeoJSONLayer.addTo(this.#map);
+
+    // Räkna om med Drone-risk
+    this.#recomputeEdgesDebounced(this.#edgesList);
+  }
+}.bind(this));
+
 
         this.#map.on('dblclick', this.#onMapDoubleClick.bind(this));
     }
@@ -295,6 +459,15 @@ class Visualization {
           return new bootstrap.Tooltip(tooltipTriggerEl)
         })
     }
+
+
+    #initializeDroneMapControls() {
+        // Kräver <button id="build-drone-map-btn"> i index.html
+        const btn = document.getElementById('build-drone-map-btn');
+        if (!btn) return;
+        btn.addEventListener('click', () => this.#buildDroneMap());
+    }
+
 
     /**
     * onMapDoubleClick method:
@@ -505,14 +678,13 @@ class Visualization {
     * unionOfBuffers method:
     */
     #unionOfBuffers(buffersList) {
-        let coords = this.#nodesList.map((node) => {return Object.values(node.point.geometry.coordinates.toReversed())});
-        console.log('nodesCoordinates: ', JSON.stringify(coords, null, 2));
-        if (this.#edgesList.length > 0) {
-            let union = polyclip.union(...buffersList.map((buffer) => buffer.geometry.coordinates));
-            return turf.buffer(turf.multiPolygon(union), 0.0001, {units: 'meters'});
-        }
-        return null;
-    }
+  if (!buffersList || buffersList.length === 0) return null;
+  if (buffersList.length === 1) return buffersList[0]; // viktiga raden
+
+  const union = polyclip.union(...buffersList.map(b => b.geometry.coordinates));
+  return turf.buffer(turf.multiPolygon(union), 0.0001, { units: 'meters' });
+}
+
 
     /**
     * computeRisksDebounced method:
@@ -650,6 +822,40 @@ class Visualization {
                     }
                 }.bind(this);
 
+                // Lägg detta direkt under worker.onmessage
+worker.onerror = (e) => {
+  console.error('workers.js error:', e.message || e);
+  this.#ongoingComputation = Math.max(0, this.#ongoingComputation - 1);
+  this.#hideSpinner();
+  worker.terminate();
+};
+
+worker.onmessageerror = (e) => {
+  console.error('workers.js message error:', e);
+  this.#ongoingComputation = Math.max(0, this.#ongoingComputation - 1);
+  this.#hideSpinner();
+  worker.terminate();
+};
+
+// enkel timeout så vi aldrig fastnar om en worker dör tyst
+const expected = numWorkers;
+let replied = 0;
+const doneOnce = () => {
+  replied += 1;
+  if (replied >= expected) clearTimeout(watchdog);
+};
+const origOnMessage = worker.onmessage;
+worker.onmessage = (ev) => { origOnMessage(ev); doneOnce(); };
+const watchdog = setTimeout(() => {
+  if (replied < expected) {
+    console.warn('workers.js timeout – avbryter beräkning');
+    this.#ongoingComputation = 0;
+    this.#hideSpinner();
+    workers.forEach(w => w.terminate());
+  }
+}, 15000); // 15 s räcker för felsökning
+
+
                 workers.push(worker);
             }
         }
@@ -662,51 +868,66 @@ class Visualization {
     *  - uppdaterar segmentens två blå kolumner och totals
     */
     #computeDroneRisk() {
-    // visa spinner konsekvent
-    if (this.#ongoingComputation < 1) this.#showSpinner();
-    this.#ongoingComputation++;
+  if (this.#ongoingComputation < 1) this.#showSpinner();
+  this.#ongoingComputation++;
 
-    const lambda = Math.max(0, this.getOtherUavDensity()); // UAV per km²
-    const R = Math.max(1, this.#NMAC_radius);              // m
-    const Vrel = this.#v_UA * 1.2;                         // m/s (enkelt antagande)
+  const sliderLambda = Math.max(0, this.getOtherUavDensity()); // UAV per km²
+  const R = Math.max(1, this.#NMAC_radius);                    // m
+  const Vrel = this.#v_UA * 1.2;                               // m/s
 
-    let totalMissionNmac = 0;
-    let totalTime = 0;
+  let totalMissionNmac = 0;
+  let totalTime = 0;
 
-    for (let edge of this.#edgesList) {
-        const airG = Math.max(1, edge.airBufferArea);      // m² (skydd mot /0)
-        const areaKm2 = airG / 1e6;
+  const haveDroneMap =
+    Array.isArray(this.#droneMapValues) &&
+    this.#droneMapValues.length === this.#population.features.length &&
+    this.#droneMapMean > 0;
 
-        // MVP-modell: kollisionsfrekvens ~ densitet * korridorarea * relativhastighet / (2R)
-        const ratePerSec = lambda * areaKm2 * (Vrel / (2 * R)); // [1/s]
+  for (let edge of this.#edgesList) {
+    const airG = Math.max(1, edge.airBufferArea); // m²
+    let lambdaEdge = sliderLambda; // fallback
 
-        // Sätt Edge-fälten via klassens egen metod:
-        // computeNMAC_rate(T_sum, v_GA_mean, partialProb)
-        // => rate = (2*R^2*T_sum*sqrt(v_UA^2+v_GA_mean^2)) / (R*airG) * partialProb
-        // Välj T_sum=1, v_GA_mean=0  => rate = (2*R*v_UA/airG) * partialProb
-        // => partialProb = ratePerSec * airG / (2*R*v_UA)
-        const T_sum = 1;                   // s
-        const v_GA_mean = 0;               // m/s
-        const partialProb = ratePerSec * airG / (2 * R * Math.max(0.001, this.#v_UA));
+    if (haveDroneMap) {
+      const ids = Helpers.treeBboxIntersect([edge.airBuffer], this.#rtreeData);
+      let num = 0, den = 0;
+      for (const id of ids) {
+        const feat = this.#population.features[id];
+        const inter = turf.intersect(edge.airBuffer, feat);
+        if (!inter) continue;
+        const a = turf.area(inter); if (a <= 0) continue;
 
-        edge.computeNMAC_rate(T_sum, v_GA_mean, partialProb);
+        const m_i = this.#droneMapValues[id] || 0;
+        const lambda_i = (m_i > 0) ? (sliderLambda * (m_i / this.#droneMapMean)) : 0;
 
-        // för totals – använd vår ratePerSec direkt
-        totalMissionNmac += (edge.length / this.#v_UA) * ratePerSec;
-        totalTime += edge.length / this.#v_UA;
-
-        this.#addSegmentRow(edge);
+        num += lambda_i * a;
+        den += a;
+      }
+      if (den > 0) lambdaEdge = num / den;
     }
 
-    // Totals (NMAC/1M flight hours, NMAC of mission)
-    const nmacPerHour = totalTime > 0 ? (totalMissionNmac * 3600 / totalTime) : 0;
-    this.#totalNMAC_rate = Math.ceil(nmacPerHour * 1e6);
-    this.#totalExpectedNMAC = totalMissionNmac;
-    this.#totalMissionDuration = totalTime;
+    const areaKm2 = airG / 1e6;
+    const ratePerSec = lambdaEdge * areaKm2 * (Vrel / (2 * R));
 
-    this.#ongoingComputation--;
-    this.#computeTotalStatistics();
+    const T_sum = 1, v_GA_mean = 0;
+    const partialProb = ratePerSec * airG / (2 * R * Math.max(0.001, this.#v_UA));
+    edge.computeNMAC_rate(T_sum, v_GA_mean, partialProb);
+
+    const segTime = edge.length / this.#v_UA; // s
+    totalMissionNmac += segTime * ratePerSec;
+    totalTime += segTime;
+
+    this.#addSegmentRow(edge);
+  }
+
+  const nmacPerHour = totalTime > 0 ? (totalMissionNmac * 3600 / totalTime) : 0;
+  this.#totalNMAC_rate = Math.ceil(nmacPerHour * 1e6);
+  this.#totalExpectedNMAC = totalMissionNmac;
+  this.#totalMissionDuration = totalTime;
+
+  this.#ongoingComputation--;
+  this.#computeTotalStatistics();
 }
+
     /**
     * showSpinner method:
     */
@@ -757,7 +978,8 @@ class Visualization {
         let linearDensity = totalLength ? (totalPopulationAtRisk / totalLength).toExponential(2) : 0;
         let exposedDensity = totalArea ? (totalPopulationAtRisk / totalArea).toExponential(2) : 0;
         let maxExposedDensity = this.#edgesList.reduce((a, edge) => Math.max(a, edge.maxSquarePopulationDensity), 0);
-        let expectedNMAC = totalArea ? (this.#totalExpectedNMAC).toExponential(2) : 0;
+        let expectedNMAC = this.#edgesList.length ? (this.#totalExpectedNMAC).toExponential(2) : 0;
+
         let totalTime = this.#totalMissionDuration;
 
         let cells = this.#totalsTableElement.querySelector('tbody').querySelector('tr').querySelectorAll('td');
@@ -847,6 +1069,29 @@ class Visualization {
         }
         this.#NMAC_Slider.noUiSlider.on('change', this.#onNMAC_sliderChange.bind(this));
     }
+
+    #initializePaxSlider() {
+        this.#paxSlider = document.getElementById('pax-slider');
+        if (!this.#paxSlider) return;
+
+        if (!this.#paxSlider.noUiSlider) {
+            noUiSlider.create(this.#paxSlider, {
+            start: [this.#paxCount],
+            step: 1,
+            connect: 'lower',
+            tooltips: {
+                to: (value) => Math.round(value),
+            },
+            range: { 'min': [1], 'max': [50] }
+            });
+        }
+        this.#paxSlider.noUiSlider.on('change', (values, handle) => {
+            this.#paxCount = Math.floor(values[handle]);
+    // Ingen återberäkning nu — parametern exponeras bara enligt Val.
+  });
+}
+
+
 
     /**
     * onNMAC_sliderChange method:
