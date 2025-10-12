@@ -14,8 +14,13 @@ self.onmessage = function (e) {
     samplePairs = 20000
   } = e.data;
 
-  const n = cells.length;
-  const m = new Float64Array(polys.length); // m(g) i feature-indexordning
+  // Bygg sampelpool – prioritera rutor med befolkning
+const pool = cells.filter(c => c.pop > 0);
+const sample = pool.length ? pool : cells;
+
+const nEff = sample.length;
+const m = new Float64Array(polys.length); // m(g)
+
 
   // Cachea cellpolygoner som Turf-Features för snabb bool-intersect
   const polyCache = new Array(polys.length);
@@ -80,7 +85,7 @@ self.onmessage = function (e) {
   // Guard: undvik patologiskt stora kandidatfönster (snabbare test)
   const candidateCells = (r1 - r0 + 1) * (c1 - c0 + 1);
   if (!isFinite(candidateCells) || candidateCells <= 0) return;
-  if (candidateCells > 8000) return;
+  if (candidateCells > 50000) return;
 
   // Testa endast celler i bboxen; ackumulera om skärning
   for (let r = r0; r <= r1; r++) {
@@ -107,24 +112,25 @@ self.onmessage = function (e) {
     // Rapportera progress INNAN den tunga addPair, så man ser att loopen lever
     if (s % 25 === 0) self.postMessage({ type: "progress", done: s, total: samplePairs });
 
-    const i = (Math.random() * n) | 0;
-    let j = (Math.random() * n) | 0;
-    if (j === i) j = (j + 1) % n;
+ const i = (Math.random() * nEff) | 0;
+let j = (Math.random() * nEff) | 0;
+if (j === i) j = (j + 1) % nEff;
+const a = sample[i], b = sample[j];
 
-    const a = cells[i], b = cells[j];
     addPair(a, b);
   }
 } else {
-  const totalPairs = (n * (n - 1)) / 2;
-  let done = 0;
-  for (let i = 0; i < n; i++) {
-    const a = cells[i];
-    for (let j = i + 1; j < n; j++) {
-      addPair(a, cells[j]);
-    }
-    done += (n - i - 1);
-    if ((i & 0x1f) === 0) self.postMessage({ type: "progress", done, total: totalPairs });
+  const totalPairs = (nEff * (nEff - 1)) / 2;
+let done = 0;
+for (let i = 0; i < nEff; i++) {
+  const a = sample[i];
+  for (let j = i + 1; j < nEff; j++) {
+    addPair(a, sample[j]);
   }
+  done += (nEff - i - 1);
+  if ((i & 0x1f) === 0) self.postMessage({ type: "progress", done, total: totalPairs });
+}
+
 }
 
 

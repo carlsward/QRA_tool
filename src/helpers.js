@@ -117,10 +117,11 @@ function createRTree(features) {
     let tree = new RBush();
 
     let items = features.map((block, index) => {
-        let coords = block['geometry']['coordinates'][0][0];
-        return {minX: coords[0][0], minY: coords[3][1], maxX: coords[2][0], maxY: coords[1][1], id: index};
-    }
-    );
+    // Fungerar för både Polygon och MultiPolygon
+    const bbox = turf.bbox(block); // [minX, minY, maxX, maxY]
+    return { minX: bbox[0], minY: bbox[1], maxX: bbox[2], maxY: bbox[3], id: index };
+});
+
 
     tree.load(items)
 

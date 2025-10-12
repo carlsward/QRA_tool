@@ -601,6 +601,16 @@ class Edge {
         this.#NMAC_radius = radius;
     }
 
+        // --- needed by Drone (beta) path where we set values directly ---
+    set NMAC_rate(value) {
+        this.#NMAC_rate = value;
+    }
+
+    set expectedNMAC(value) {
+        this.#expectedNMAC = value;
+    }
+
+
      set NMAC_time(time) {
         this.#NMAC_time = time;
     }

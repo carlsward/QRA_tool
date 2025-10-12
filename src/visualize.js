@@ -287,12 +287,15 @@ class Visualization {
       // Rita som svag värmekarta (syns bara i Drone-läget)
       if (this.#droneMapGeoJSONLayer) this.#droneMapGeoJSONLayer.remove();
       this.#droneMapGeoJSONLayer = L.geoJSON(styled, {
-        style: f => {
-          const v = f.properties.m || 0;
-          const a = Math.min(0.8, v > 0 ? (Math.log10(v+1)/6) : 0);
-          return { color: '#ff6600', weight: 1, fillOpacity: a, fillColor: '#ff6600' };
-        }
-      });
+  // Viktigt: släpp igenom dubbelklick till kartan
+  interactive: false,
+  style: f => {
+    const v = f.properties.m || 0;
+    const a = Math.min(0.8, v > 0 ? (Math.log10(v+1)/6) : 0);
+    return { color: '#ff6600', weight: 1, fillOpacity: a, fillColor: '#ff6600' };
+  }
+});
+
       if (this.#droneMode) this.#droneMapGeoJSONLayer.addTo(this.#map);
 
       this.#offerDroneMapDownload(styled);
@@ -370,8 +373,16 @@ worker.onmessageerror = (err) => {
             { collapsed: false }
         ).addTo(this.#map);
 
-        let groundGeoJSONLayer = L.geoJSON(this.#population, {style: Helpers.groundStyling}).addTo(this.#map);
-        let airGeoJSONLayer = L.geoJSON(this.#population, {style: Helpers.airStyling});
+        let groundGeoJSONLayer = L.geoJSON(this.#population, {
+  style: Helpers.groundStyling,
+  interactive: false          // <— släpp igenom dubbelklick
+}).addTo(this.#map);
+
+let airGeoJSONLayer = L.geoJSON(this.#population, {
+  style: Helpers.airStyling,
+  interactive: false          // <— släpp igenom dubbelklick
+});
+
 
         this.#groundBuffersUnionGeoJsonLayers.addTo(this.#map);
         this.#nodesGeoJsonLayersList.addTo(this.#map);
@@ -380,60 +391,42 @@ worker.onmessageerror = (err) => {
         // Add a listener to the 'baselayerchange' event
         this.#map.on('baselayerchange', function (e) {
   if (e.name === Layers.Ground) {
-    // Vi går till Ground-läget
     this.#droneMode = false;
-
-    // DÖLJ drone-map-lagret om det finns
     if (this.#droneMapGeoJSONLayer) this.#droneMapGeoJSONLayer.remove();
 
-    // Visa ground-lagren, dölj air-lagren
     airGeoJSONLayer.remove();
     this.#airBuffersUnionGeoJsonLayers.remove();
-    this.#edgesGeoJsonLayersList.remove();
 
     groundGeoJSONLayer.addTo(this.#map);
     this.#groundBuffersUnionGeoJsonLayers.addTo(this.#map);
-    this.#edgesGeoJsonLayersList.addTo(this.#map);
 
   } else if (e.name === Layers.Air) {
-    // Vi går till Air-läget (UAV vs GA)
     this.#droneMode = false;
-
-    // DÖLJ drone-map-lagret om det finns
     if (this.#droneMapGeoJSONLayer) this.#droneMapGeoJSONLayer.remove();
 
-    // Visa air-lagren, dölj ground-lagren
     groundGeoJSONLayer.remove();
     this.#groundBuffersUnionGeoJsonLayers.remove();
-    this.#edgesGeoJsonLayersList.remove();
 
     airGeoJSONLayer.addTo(this.#map);
     this.#airBuffersUnionGeoJsonLayers.addTo(this.#map);
-    this.#edgesGeoJsonLayersList.addTo(this.#map);
 
-    // Räkna om med Air-risk
     this.#recomputeEdgesDebounced(this.#edgesList);
 
   } else if (e.name === Layers.Drone) {
-    // Vi går till Drone-läget (UAV–UAV)
     this.#droneMode = true;
 
-    // Dölj ground-overlay, visa samma OSM-bakgrund/air-overlay
     groundGeoJSONLayer.remove();
     this.#groundBuffersUnionGeoJsonLayers.remove();
-    this.#edgesGeoJsonLayersList.remove();
 
-    airGeoJSONLayer.addTo(this.#map);                 // bakgrund (samma som Air)
+    airGeoJSONLayer.addTo(this.#map);
     this.#airBuffersUnionGeoJsonLayers.addTo(this.#map);
-    this.#edgesGeoJsonLayersList.addTo(this.#map);
 
-    // VISA drone-map-värmekartan om den finns (byggs via knappen/worker)
     if (this.#droneMapGeoJSONLayer) this.#droneMapGeoJSONLayer.addTo(this.#map);
 
-    // Räkna om med Drone-risk
     this.#recomputeEdgesDebounced(this.#edgesList);
   }
 }.bind(this));
+
 
 
         this.#map.on('dblclick', this.#onMapDoubleClick.bind(this));
@@ -498,10 +491,15 @@ worker.onmessageerror = (err) => {
                 edge.update();
             }
             this.#edgesGeoJsonLayersList.addLayer(edge.polyline);
-            this.#edgesList.push(edge);
-            this.#updateBuffersUnion("ground");
-            this.#updateBuffersUnion("air");
-            this.#recomputeEdges([edge]); // was: this.#computeRisks([edge]);
+this.#edgesList.push(edge);
+
+// NEW: visa raden direkt (med 0:or tills beräkningen uppdaterar värdena)
+this.#addSegmentRow(edge);
+
+this.#updateBuffersUnion("ground");
+this.#updateBuffersUnion("air");
+this.#recomputeEdges([edge]); // beräkningen uppdaterar sedan raden
+
         }
     }
 
@@ -665,11 +663,17 @@ worker.onmessageerror = (err) => {
 
         if (location === "ground") {
             this.#groundBuffersUnion = buffersUnion;
-            this.#groundBuffersUnionGeoJSON = L.geoJSON(buffersUnion, {style: Helpers.groundBuffersStyle});
+            this.#groundBuffersUnionGeoJSON = L.geoJSON(buffersUnion, {
+  style: Helpers.groundBuffersStyle,
+  interactive: false
+});
             this.#groundBuffersUnionGeoJsonLayers.addLayer(this.#groundBuffersUnionGeoJSON);
         } else if (location === "air") {
             this.#airBuffersUnion = buffersUnion;
-            this.#airBuffersUnionGeoJSON = L.geoJSON(buffersUnion, {style: Helpers.airBuffersStyle});
+            this.#airBuffersUnionGeoJSON = L.geoJSON(buffersUnion, {
+  style: Helpers.airBuffersStyle,
+  interactive: false
+});
             this.#airBuffersUnionGeoJsonLayers.addLayer(this.#airBuffersUnionGeoJSON);
         }
     }
@@ -698,20 +702,28 @@ worker.onmessageerror = (err) => {
     * Helper: central dispatch – kör rätt beräkning beroende på läge
     */
     #recomputeEdges(edges) {
-        if (this.#droneMode) {
-            this.#computeDroneRisk();  // ignorerar 'edges' – snabbt ändå
-        } else {
-            this.#computeRisks(edges);
-        }
-    }
+  if (this.#droneMode) {
+    // Drone-risk (NMAC UAV–UAV)
+    this.#computeDroneRisk();
+    // Ground/GEA-beräkning (uppdaterar population/area m.m., rör inte Drone-NMAC)
+    this.#computeRisks(edges);
+  } else {
+    this.#computeRisks(edges);
+  }
+}
+
     #recomputeEdgesDebounced(edges) {
-        clearTimeout(this.#timeoutId);
-        if (this.#droneMode) {
-            this.#timeoutId = setTimeout(() => { this.#computeDroneRisk(); }, 500);
-        } else {
-            this.#timeoutId = setTimeout(() => { this.#computeRisks(edges); }, 1000);
-        }
-    }
+  clearTimeout(this.#timeoutId);
+  if (this.#droneMode) {
+    this.#timeoutId = setTimeout(() => {
+      this.#computeDroneRisk();
+      this.#computeRisks(edges);
+    }, 500);
+  } else {
+    this.#timeoutId = setTimeout(() => { this.#computeRisks(edges); }, 1000);
+  }
+}
+
 
     /**
     * computeRisks method (befintlig Air risk mot GA):
@@ -725,7 +737,8 @@ worker.onmessageerror = (err) => {
             }
             this.#ongoingComputation++;
 
-            this.#totalNMAC_rate = 0;
+            if (!this.#droneMode) this.#totalNMAC_rate = 0;
+
             edges.map((edge) => {edge.population = 0;})
 
             let blocks = null;
@@ -749,6 +762,7 @@ worker.onmessageerror = (err) => {
             let edgesSubsetAverageSpeeds = []
             let maxPopulations = [];
             let tileArea = 10_000; // 100x100
+            let aborted = false;
 
             for (let i = 0; i < numWorkers; i++) {
                 let start = i*chunkSize;
@@ -766,6 +780,13 @@ worker.onmessageerror = (err) => {
                 worker.postMessage([subset, groundBuffers, airBuffers, circles, tileArea]);
 
                 worker.onmessage = function(event) {
+                    if (aborted) {
+  try { workers.forEach(w => w.terminate()); } catch (_) {}
+  this.#ongoingComputation = Math.max(0, this.#ongoingComputation - 1);
+  this.#hideSpinner();
+  return;
+}
+
                     let [edgesIntersectedPopulation, circlesPopulations, edgesTimes,
                          edgesAverageSpeeds, edgesMaxPopulations] = event.data;
 
@@ -788,29 +809,42 @@ worker.onmessageerror = (err) => {
                             dest.circleCoveredPopulation = circlesPopulation[1];
 
                             let T_sum = (edgesSubsetTimes.map((lst) => {return lst[j]})).reduce((a, c) => a + c, 0);
-                            edge.NMAC_time = T_sum;
-                            let edgeAverageSpeeds = edgesSubsetAverageSpeeds.map((lst) => {return lst[j]});
-                            edgeAverageSpeeds = edgeAverageSpeeds.flat().filter(v => v > 0);
-                            edge.NMAC_avg_speeds = edgeAverageSpeeds;
-                            let v_GA_mean = edgeAverageSpeeds.reduce((a, c) => a + c, 0) / edgeAverageSpeeds.length || 0;
-                            let prob = this.#population.features[0].properties.p;
-                            edge.computeNMAC_rate(T_sum, v_GA_mean, prob);
+edge.NMAC_time = T_sum;
+
+let edgeAverageSpeeds = edgesSubsetAverageSpeeds.map((lst) => {return lst[j]});
+edgeAverageSpeeds = edgeAverageSpeeds.flat().filter(v => v > 0);
+
+// Spara hastighetslistan alltid (ofarligt), men räkna GA-NMAC bara om vi INTE är i Drone-läge
+edge.NMAC_avg_speeds = edgeAverageSpeeds;
+
+if (!this.#droneMode) {
+  let v_GA_mean = edgeAverageSpeeds.reduce((a, c) => a + c, 0) / edgeAverageSpeeds.length || 0;
+  let prob = this.#population.features[0].properties.p;
+  edge.computeNMAC_rate(T_sum, v_GA_mean, prob);
+}
+
                         }
 
-                        let totalAverageGASpeeds = this.#edgesList.reduce(function (flattenedArray, element) {
-                            return flattenedArray.concat(element.NMAC_avg_speeds);
-                          }, []);
-                        let v = totalAverageGASpeeds.flat();
-                        let v_mean = v.length > 0 ? v.reduce((a, c) => a + c, 0) / v.length : 0;
-                        let airG = this.#edgesList.reduce((a, c) => a + c.airBufferArea, 0);
-                        let totalTime = this.#edgesList.reduce((a, c) => a + c.NMAC_time, 0);
-                        let total_p_HC = (2 * this.#NMAC_radius**2 * totalTime * Math.sqrt(this.#v_UA**2 + v_mean**2)) /
-                                         (this.#NMAC_radius * airG);
-                        let rate = total_p_HC * this.#population.features[0].properties.p;
-                        let totalLength = this.#edgesList.reduce((a, edge) => a + edge.length, 0);
-                        this.#totalExpectedNMAC = (totalLength / this.#v_UA) * rate;
-                        this.#totalMissionDuration = totalLength / this.#v_UA;
-                        this.#totalNMAC_rate = Math.ceil(rate * 3600 * 1e6)
+                        // Totals – uppdatera GA-NMAC bara om vi INTE är i Drone-läge
+let totalLength = this.#edgesList.reduce((a, edge) => a + edge.length, 0);
+this.#totalMissionDuration = totalLength / this.#v_UA; // tid kan vi alltid uppdatera
+
+if (!this.#droneMode) {
+  let totalAverageGASpeeds = this.#edgesList.reduce(function (flattenedArray, element) {
+    return flattenedArray.concat(element.NMAC_avg_speeds);
+  }, []);
+  let v = totalAverageGASpeeds.flat();
+  let v_mean = v.length > 0 ? v.reduce((a, c) => a + c, 0) / v.length : 0;
+  let airG = this.#edgesList.reduce((a, c) => a + c.airBufferArea, 0);
+  let totalTime = this.#edgesList.reduce((a, c) => a + c.NMAC_time, 0);
+  let total_p_HC = (2 * this.#NMAC_radius**2 * totalTime * Math.sqrt(this.#v_UA**2 + v_mean**2)) /
+                   (this.#NMAC_radius * airG);
+  let rate = total_p_HC * this.#population.features[0].properties.p;
+
+  this.#totalExpectedNMAC = (totalLength / this.#v_UA) * rate;
+  this.#totalNMAC_rate    = Math.ceil(rate * 3600 * 1e6);
+}
+
 
                         this.#ongoingComputation--;
                         this.#computeTotalStatistics()
@@ -867,66 +901,102 @@ const watchdog = setTimeout(() => {
     *  - relativhastighet ~ 1.2 * egenhastighet (enkelt antagande)
     *  - uppdaterar segmentens två blå kolumner och totals
     */
-    #computeDroneRisk() {
+ #computeDroneRisk() {
   if (this.#ongoingComputation < 1) this.#showSpinner();
   this.#ongoingComputation++;
 
-  const sliderLambda = Math.max(0, this.getOtherUavDensity()); // UAV per km²
-  const R = Math.max(1, this.#NMAC_radius);                    // m
-  const Vrel = this.#v_UA * 1.2;                               // m/s
-
-  let totalMissionNmac = 0;
+  try {
+    const sliderLambda = Math.max(0, this.getOtherUavDensity()); // UAV/km²
+    const R = Math.max(1, this.#NMAC_radius);                    // m
+    const Vrel = this.#v_UA * 1.2;
+    
+    // Om densiteten är noll: nolla alla NMAC-värden och skriv ut tabellen direkt
+if (sliderLambda === 0) {
   let totalTime = 0;
-
-  const haveDroneMap =
-    Array.isArray(this.#droneMapValues) &&
-    this.#droneMapValues.length === this.#population.features.length &&
-    this.#droneMapMean > 0;
-
   for (let edge of this.#edgesList) {
-    const airG = Math.max(1, edge.airBufferArea); // m²
-    let lambdaEdge = sliderLambda; // fallback
-
-    if (haveDroneMap) {
-      const ids = Helpers.treeBboxIntersect([edge.airBuffer], this.#rtreeData);
-      let num = 0, den = 0;
-      for (const id of ids) {
-        const feat = this.#population.features[id];
-        const inter = turf.intersect(edge.airBuffer, feat);
-        if (!inter) continue;
-        const a = turf.area(inter); if (a <= 0) continue;
-
-        const m_i = this.#droneMapValues[id] || 0;
-        const lambda_i = (m_i > 0) ? (sliderLambda * (m_i / this.#droneMapMean)) : 0;
-
-        num += lambda_i * a;
-        den += a;
-      }
-      if (den > 0) lambdaEdge = num / den;
-    }
-
-    const areaKm2 = airG / 1e6;
-    const ratePerSec = lambdaEdge * areaKm2 * (Vrel / (2 * R));
-
-    const T_sum = 1, v_GA_mean = 0;
-    const partialProb = ratePerSec * airG / (2 * R * Math.max(0.001, this.#v_UA));
-    edge.computeNMAC_rate(T_sum, v_GA_mean, partialProb);
-
-    const segTime = edge.length / this.#v_UA; // s
-    totalMissionNmac += segTime * ratePerSec;
+    const segTime = edge.length / this.#v_UA;
     totalTime += segTime;
 
+    edge.NMAC_rate = 0;
+    edge.expectedNMAC = 0;
     this.#addSegmentRow(edge);
   }
-
-  const nmacPerHour = totalTime > 0 ? (totalMissionNmac * 3600 / totalTime) : 0;
-  this.#totalNMAC_rate = Math.ceil(nmacPerHour * 1e6);
-  this.#totalExpectedNMAC = totalMissionNmac;
+  this.#totalNMAC_rate = 0;
+  this.#totalExpectedNMAC = 0;
   this.#totalMissionDuration = totalTime;
 
-  this.#ongoingComputation--;
-  this.#computeTotalStatistics();
+  this.#ongoingComputation = Math.max(0, this.#ongoingComputation - 1);
+  this.#computeTotalStatistics(); // skriver totals oavsett spinner
+  return;
 }
+// m/s
+
+    let totalMissionNmac = 0;
+    let totalTime = 0;
+
+    const haveDroneMap =
+      Array.isArray(this.#droneMapValues) &&
+      this.#droneMapValues.length === this.#population.features.length &&
+      this.#droneMapMean > 0;
+
+    for (let edge of this.#edgesList) {
+      const airG = Math.max(1, edge.airBufferArea);     // m²
+      const segTime = edge.length / this.#v_UA;         // s
+      let lambdaEdge = sliderLambda;                    // UAV/km² (fallback)
+
+      if (haveDroneMap && this.#rtreeData) {
+        try {
+          const ids = Helpers.treeBboxIntersect([edge.airBuffer], this.#rtreeData) || [];
+          let num = 0, den = 0;
+          for (const id of ids) {
+            const feat = this.#population.features[id];
+            const inter = turf.intersect(edge.airBuffer, feat);
+            if (!inter) continue;
+            const a = turf.area(inter); if (!(a > 0)) continue;
+
+            const m_i = this.#droneMapValues[id] || 0;
+            const lambda_i = (m_i > 0) ? (sliderLambda * (m_i / this.#droneMapMean)) : 0;
+
+            num += lambda_i * a;
+            den += a;
+          }
+          if (den > 0) {
+            const local = num / den;
+            if (local > 0) lambdaEdge = local;
+          }
+        } catch (e) {
+          console.warn('Drone risk: fallback to uniform density', e);
+        }
+      }
+
+      // Intensitet (NMAC/s): λ [UAV/km²] * area [km²] * (Vrel / (2R))
+      const areaKm2  = airG / 1e6;
+      const ratePerSec = lambdaEdge * areaKm2 * (Vrel / (2 * R));
+
+      // Sätt direkt på segmentet (inga extra "T_equiv"-varv)
+      edge.NMAC_rate    = Math.ceil(ratePerSec * 3600 * 1e6); // per 10^6 flight hours
+      edge.expectedNMAC = ratePerSec * segTime;               // NMAC för segmentet
+
+      totalMissionNmac += edge.expectedNMAC;
+      totalTime        += segTime;
+
+      this.#addSegmentRow(edge);
+    }
+
+    const nmacPerHour = totalTime > 0 ? (totalMissionNmac * 3600 / totalTime) : 0;
+    this.#totalNMAC_rate       = Math.ceil(nmacPerHour * 1e6);
+    this.#totalExpectedNMAC    = totalMissionNmac;
+    this.#totalMissionDuration = totalTime;
+
+  } catch (err) {
+    console.error('computeDroneRisk failed:', err);
+  } finally {
+    this.#ongoingComputation = Math.max(0, this.#ongoingComputation - 1);
+    this.#computeTotalStatistics();
+  }
+}
+
+
 
     /**
     * showSpinner method:
@@ -988,12 +1058,12 @@ const watchdog = setTimeout(() => {
                     Math.ceil(totalArea), linearDensity, exposedDensity, maxExposedDensity, this.#totalNMAC_rate,
                     expectedNMAC];
 
-        if (this.#ongoingComputation < 1) {
-            for (let i = 0; i < cells.length; i++) {
-                 cells[i].textContent = data[i];
-            }
-            this.#hideSpinner();
-        }
+        // Skriv alltid ut totals – spinner styrs separat
+for (let i = 0; i < cells.length; i++) {
+  cells[i].textContent = data[i];
+}
+if (this.#ongoingComputation < 1) this.#hideSpinner();
+
     }
 
     /**
@@ -1068,6 +1138,13 @@ const watchdog = setTimeout(() => {
             });
         }
         this.#NMAC_Slider.noUiSlider.on('change', this.#onNMAC_sliderChange.bind(this));
+        // valfritt – kör samma logik när man släpper handtaget (ger snabbare feedback)
+this.#NMAC_Slider.noUiSlider.on('update', (v, h) => {
+  // Kör bara i Drone-läget för att undvika tunga turf-uppdateringar för ofta i GA-läget
+  if (!this.#droneMode) return;
+  this.#onNMAC_sliderChange(v, h);
+});
+
     }
 
     #initializePaxSlider() {
@@ -1165,9 +1242,16 @@ const watchdog = setTimeout(() => {
     * onUavSpeedSliderChange method:
     */
     #onUavSpeedSliderChange(values, handle) {
-        this.#v_UA = values[handle];
-        this.#edgesList.map((edge) => {edge.v_UA = this.#v_UA})
-        this.#recomputeEdgesDebounced(this.#edgesList);
+        this.#v_UA = parseFloat(values[handle]);          // säkerställ nummer
+this.#edgesList.forEach(edge => { edge.v_UA = this.#v_UA; });
+
+// Snabb respons: kör rätt beräkning direkt
+if (this.#droneMode) {
+  this.#computeDroneRisk();
+} else {
+  this.#recomputeEdgesDebounced(this.#edgesList);
+}
+
     }
 
     /**
@@ -1240,7 +1324,12 @@ const watchdog = setTimeout(() => {
                 },
             });
         }
-        this.#otherUavDensitySlider.noUiSlider.on('change', () => this.#recomputeEdgesDebounced(this.#edgesList));
+       // Kör alltid Drone-risk direkt – lätt beräkning och oberoende av lager/worker-status
+const recomputeDrone = () => { if (this.#droneMode) this.#computeDroneRisk(); };
+this.#otherUavDensitySlider.noUiSlider.on('change', recomputeDrone);
+this.#otherUavDensitySlider.noUiSlider.on('update', recomputeDrone);
+
+
     }
 
     /**
