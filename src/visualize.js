@@ -84,6 +84,13 @@ class Visualization {
     #NMAC_radius;
     #segmentExtensionLength;
     #v_UA;
+    #sumDTotal;
+    #lMeters;
+    #lambdaBarValues; 
+    #sumDWindow;
+     // Float64 per ruta (λ̄(g))  ← NYTT
+
+
 
     #populationElement;
     #lengthElement;
@@ -99,7 +106,7 @@ class Visualization {
     #speedSlider;
     #extensionSlider;
     #globalAltitudeSlider;
-    #otherUavDensitySlider;
+    #Nslider; // N (operations during T)
     #paxSlider;
     #paxCount;
     #droneMapValues;          // Float64 per ruta (m(g))
@@ -177,11 +184,10 @@ class Visualization {
         this.#initializeEdgeExtensionSlider();
         this.#initializeUavSpeedSlider();
         this.#initializeGlobalAltitudeSlider();
-        this.#initializeOtherUavDensitySlider(); // NEW
+        this.#initializeNSlider(); // NEW: N (operations during T)
         this.#initializeSegmentExtensionCheckbox();
         this.#computeTotalStatistics();
         this.#initializePaxSlider();
-        this.#initializeDroneMapControls(); // NEW: knapp för att bygga drone map
 
 
     }
@@ -214,6 +220,15 @@ class Visualization {
               console.error('Error creating R-Tree of the data:', error);
             }
         }
+                // Global summa av D (B) över hela domänen L – används för LiU-normalisering
+        try {
+            this.#sumDTotal = (this.#population?.features || [])
+                .reduce((acc, f) => acc + (f.properties?.B || 0), 0);
+        } catch (e) {
+            this.#sumDTotal = 0;
+            console.warn('Failed to compute sumDTotal:', e);
+        }
+
     }
 
 
@@ -247,9 +262,86 @@ class Visualization {
 
   // 4) Geometrier i samma indexordning som features
   const polys = feats.map(f => f.geometry);
+// DEBUG: hur ser "griden" ut?
+window.__gridInfo = { 
+  nFeatures: feats.length, 
+  nRows: lats.length, 
+  nCols: lons.length 
+};
+console.log('[Grid]', 'features=', feats.length, 'rows=', lats.length, 'cols=', lons.length);
 
   return { cells, idByRC, lats, lons, polys };
+
+  
 }
+
+#windowIdsByRadiusKm(km = 3) {
+  // Hämta centrum och skapa en cirkel (WGS84)
+  const ctr = this.#map.getCenter(); // {lat, lng}
+  const circle = turf.circle([ctr.lng, ctr.lat], km, { units: 'kilometers', steps: 64 });
+
+  const ids = [];
+  // Gå igenom alla features och ta med de vars centroid hamnar i cirkeln
+  for (let i = 0; i < this.#population.features.length; i++) {
+    const feat = this.#population.features[i];
+    const c = turf.centroid(feat).geometry.coordinates; // [lon, lat]
+    const inside = turf.booleanPointInPolygon(turf.point(c), circle);
+    if (inside) ids.push(i);
+  }
+
+  // Debug så vi ser att urvalet inte är tomt
+  console.log('[DroneMap][demo] radius km =', km, 'picked ids =', ids.length);
+  return ids;
+}
+
+
+#windowIdsAroundCenter(lats, lons, idByRC, H = 10, W = 10) {
+  const ctr = this.#map.getCenter(); // {lat, lng}
+
+  // hitta närmaste rad/kolumn till centrum
+  let rC = 0, cC = 0, dR = Infinity, dC = Infinity;
+  for (let r = 0; r < lats.length; r++) {
+    const d = Math.abs(lats[r] - ctr.lat);
+    if (d < dR) { dR = d; rC = r; }
+  }
+  for (let c = 0; c < lons.length; c++) {
+    const d = Math.abs(lons[c] - ctr.lng);
+    if (d < dC) { dC = d; cC = c; }
+  }
+
+  // bygg fönstrets rader/kolumner (klamra inom grid)
+  const rHalf = Math.floor(H/2), cHalf = Math.floor(W/2);
+  const r0 = Math.max(0, rC - rHalf), r1 = Math.min(lats.length - 1, rC + rHalf);
+  const c0 = Math.max(0, cC - cHalf), c1 = Math.min(lons.length - 1, cC + cHalf);
+
+  const ids = [];
+  for (let r = r0; r <= r1; r++) {
+    for (let c = c0; c <= c1; c++) {
+      const id = idByRC[r + '|' + c];
+      if (id !== undefined) ids.push(id);
+    }
+  }
+  return ids; // lista av cell-id:n i fönstret
+}
+
+
+#demoBBoxKm(km = 6) {
+  if (!this.#map) return null;
+  const c = this.#map.getCenter(); // {lat, lng}
+  const circle = turf.circle([c.lng, c.lat], km, { units: 'kilometers', steps: 64 });
+  return turf.bbox(circle); // [minX, minY, maxX, maxY]
+}
+
+#nearestIndex(sorted, value) {
+  // sorted stigande, returnera index för närmast värde
+  let bestI = 0, bestD = Infinity;
+  for (let i = 0; i < sorted.length; i++) {
+    const d = Math.abs(sorted[i] - value);
+    if (d < bestD) { bestD = d; bestI = i; }
+  }
+  return bestI;
+}
+
 
 
 #buildDroneMap(mode = "sample") {
@@ -257,47 +349,140 @@ class Visualization {
 
   const { cells, idByRC, lats, lons, polys } = this.#prepareGridIndexFromPopulation();
 
+  const opts = arguments[1] || {};
+  const size = (mode === "liu-window") ? (opts.size || 10) : null;
+
+  function countCellsInWindow(cells, r0, r1, c0, c1) {
+    let k = 0;
+    for (const c of cells) if (c.r >= r0 && c.r <= r1 && c.c >= c0 && c.c <= c1) k++;
+    return k;
+  }
+  function pickDensestAround(cells, lats, lons, size, rRef, cRef, radius = 80) {
+    const half = Math.floor(size / 2);
+    let best = null, bestCnt = -1;
+    for (let dr = -radius; dr <= radius; dr++) {
+      for (let dc = -radius; dc <= radius; dc++) {
+        const rC = Math.max(0, Math.min(lats.length - 1, rRef + dr));
+        const cC = Math.max(0, Math.min(lons.length - 1, cRef + dc));
+        let r0 = Math.max(0, rC - half), r1 = Math.min(lats.length - 1, rC + half);
+        let c0 = Math.max(0, cC - half), c1 = Math.min(lons.length - 1, cC + half);
+        const cnt = countCellsInWindow(cells, r0, r1, c0, c1);
+        if (cnt > bestCnt) { bestCnt = cnt; best = { r0, r1, c0, c1, cnt }; }
+      }
+    }
+    return best;
+  }
+
+// --- Bygg LiU-fönster (K närmaste celler kring centrum) ---
+let filteredCells = cells;
+
+if (mode === "liu-window") {
+  const want = (opts.size || 10) * (opts.size || 10); // t.ex. 10x10 = 100
+  const center = this.#map.getCenter(); // { lat, lng }
+
+  // Avstånd i lat/lon-rum (räcker för urvalet); mappa cell -> (d², pop)
+  const ranked = cells.map(c => {
+    const lat = lats[c.r], lon = lons[c.c];
+    const d2 = (lat - center.lat) * (lat - center.lat) + (lon - center.lng) * (lon - center.lng);
+    return { cell: c, d2, pop: c.pop || 0 };
+  });
+
+  // Prioritera befolkade celler runt centrum
+  ranked.sort((a, b) => {
+    if ((b.pop > 0) !== (a.pop > 0)) return (b.pop > 0) ? 1 : -1; // pop>0 först
+    return a.d2 - b.d2;
+  });
+
+  filteredCells = ranked.slice(0, want).map(x => x.cell);
+
+  console.log('[DroneMap] liu-window (convex hull, nearest K)', {
+    size: opts.size || 10,
+    cellsInWindow: filteredCells.length
+  });
+}
+
+
   if (this.#ongoingComputation < 1) this.#showSpinner();
   this.#ongoingComputation++;
 
-  const worker = new Worker(droneMapWorkerUrl);
-  worker.postMessage({ cells, idByRC, lats, lons, polys, mode, samplePairs: 20000 });
+  // mål-pixlar (g) som får ackumuleras
+  let allowedIds = null;
+if (mode === "liu-window") {
+  allowedIds = filteredCells.map(c => c.id);
+}
 
+
+  const worker = new Worker(droneMapWorkerUrl);
+  worker.postMessage({
+    cells: filteredCells,
+    idByRC, lats, lons, polys,
+    mode: "liu-window",
+windowRC: null,                 // ej rektangel – vi skickar bara K celler
+restrictTargets: true,          // ackumulera endast på våra valda celler
+allowedIds,
+
+    samplePairs: 0
+  });
+  console.log('[DroneMap] posting to worker:', mode, filteredCells.length, 'cells');
 
   worker.onmessage = (ev) => {
     const msg = ev.data;
     if (msg.type === 'progress') {
-  const pct = Math.round((msg.done / (msg.total || 1)) * 100);
-  console.log(`Drone map: ${msg.done}/${msg.total} (${pct}%)`);
-  return;
-}
-
+      const pct = (typeof msg.pct === 'number') ? msg.pct : Math.round((msg.done / (msg.total || 1)) * 100);
+      console.log(`Drone map: ${msg.done}/${msg.total} (${pct}%)`);
+      return;
+    }
     if (msg.type === 'result') {
-      this.#droneMapValues = msg.mValues; // m(g)
-      // Beräkna ett robust medel (ignorera nollor) för normalisering
-      const nonZero = this.#droneMapValues.filter(v => v > 0);
-      this.#droneMapMean = nonZero.length ? (nonZero.reduce((a,c)=>a+c,0) / nonZero.length) : 1;
+      this.#droneMapValues = msg.mValues;
+      
 
-      // Bädda m(g) in i en kopia av geojson för visualization
+      const meta = msg.meta || {};
+      this.#lMeters = meta.lMeters || this.#lMeters || 100;
+      this.#sumDWindow  = meta.sumDWindow || this.#sumDWindow || 1;  // ← NY
+
+
+      const N = this.getN();
+      const v = this.#v_UA;
+      const l = meta.lMeters || 100;
+      const T = 12 * 3600;
+      const sumD = meta.sumDWindow || 1;
+      const factor = (l / v) / (T * sumD * sumD);
+      const lambdaBar = this.#droneMapValues.map(m_i => N * m_i * factor);
+      this.#lambdaBarValues = lambdaBar;   // ← spara λ̄(g) för risk-beräkningen
+
+
       const styled = JSON.parse(JSON.stringify(this.#population));
       for (let i = 0; i < styled.features.length; i++) {
-        styled.features[i].properties.m = this.#droneMapValues[i] || 0;
+        styled.features[i].properties.m_raw  = this.#droneMapValues[i] || 0;
+        styled.features[i].properties.lambda = lambdaBar[i] || 0;
       }
 
-      // Rita som svag värmekarta (syns bara i Drone-läget)
+      const vals = lambdaBar.filter(v => v > 0).sort((a,b) => a - b);
+      const mean = vals.length ? vals.reduce((a,c)=>a+c,0)/vals.length : 0;
+      const p95  = vals.length ? vals[Math.floor(vals.length*0.95)] : 0;
+      this.#droneMapMean = mean;
+
+      function heatColor(t) {
+        const h = 15 + 45 * t;
+        const lgt = 40 + 20 * t;
+        return `hsl(${h}, 100%, ${lgt}%)`;
+      }
       if (this.#droneMapGeoJSONLayer) this.#droneMapGeoJSONLayer.remove();
       this.#droneMapGeoJSONLayer = L.geoJSON(styled, {
-  // Viktigt: släpp igenom dubbelklick till kartan
-  interactive: false,
-  style: f => {
-    const v = f.properties.m || 0;
-    const a = Math.min(0.8, v > 0 ? (Math.log10(v+1)/6) : 0);
-    return { color: '#ff6600', weight: 1, fillOpacity: a, fillColor: '#ff6600' };
-  }
-});
-
+        interactive: false,
+        style: (f) => {
+          const v = f.properties.lambda || 0;
+          const denom = p95 > 0 ? p95 : (mean > 0 ? mean : 1);
+          const norm = Math.min(1, v / denom);
+          const alpha = norm > 0 ? (0.15 + 0.6 * Math.sqrt(norm)) : 0;
+          return { fillColor: heatColor(norm), fillOpacity: alpha, stroke: false };
+        }
+      });
       if (this.#droneMode) this.#droneMapGeoJSONLayer.addTo(this.#map);
 
+      console.log('[DroneMap][Etapp2]', { sumD, l, factor, cellsPos: vals.length, mean, p95 });
+
+      if (this.#droneMode) this.#computeDroneRisk();
       this.#offerDroneMapDownload(styled);
 
       this.#ongoingComputation--;
@@ -306,22 +491,11 @@ class Visualization {
       worker.terminate();
     }
   };
-
-  worker.onerror = (err) => {
-  console.error('DroneMap worker error:', err.message || err);
-  this.#ongoingComputation = 0;
-  this.#hideSpinner();
-  worker.terminate();
-};
-
-worker.onmessageerror = (err) => {
-  console.error('DroneMap worker message error:', err);
-  this.#ongoingComputation = 0;
-  this.#hideSpinner();
-  worker.terminate();
-};
-
+  worker.onerror = (err) => { console.error('DroneMap worker error:', err.message || err); this.#ongoingComputation = 0; this.#hideSpinner(); worker.terminate(); };
+  worker.onmessageerror = (err) => { console.error('DroneMap worker message error:', err); this.#ongoingComputation = 0; this.#hideSpinner(); worker.terminate(); };
 }
+
+
 
 
 #offerDroneMapDownload(geojson) {
@@ -387,7 +561,7 @@ let airGeoJSONLayer = L.geoJSON(this.#population, {
         this.#groundBuffersUnionGeoJsonLayers.addTo(this.#map);
         this.#nodesGeoJsonLayersList.addTo(this.#map);
         this.#edgesGeoJsonLayersList.addTo(this.#map);
-
+        
         // Add a listener to the 'baselayerchange' event
         this.#map.on('baselayerchange', function (e) {
   if (e.name === Layers.Ground) {
@@ -413,19 +587,30 @@ let airGeoJSONLayer = L.geoJSON(this.#population, {
     this.#recomputeEdgesDebounced(this.#edgesList);
 
   } else if (e.name === Layers.Drone) {
-    this.#droneMode = true;
+  this.#droneMode = true;
 
-    groundGeoJSONLayer.remove();
-    this.#groundBuffersUnionGeoJsonLayers.remove();
+  // Dölj båda choropleths
+  groundGeoJSONLayer.remove();
+  this.#groundBuffersUnionGeoJsonLayers.remove();
+  airGeoJSONLayer.remove(); // <— viktigt: ta bort Air-choropleth
 
-    airGeoJSONLayer.addTo(this.#map);
-    this.#airBuffersUnionGeoJsonLayers.addTo(this.#map);
+  // Visa gärna air-bufferkonturer (NMAC-korridorer)
+  this.#airBuffersUnionGeoJsonLayers.addTo(this.#map);
 
-    if (this.#droneMapGeoJSONLayer) this.#droneMapGeoJSONLayer.addTo(this.#map);
+  // Visa drone-map-overlay om den finns
+  if (this.#droneMapGeoJSONLayer) this.#droneMapGeoJSONLayer.addTo(this.#map);
 
-    this.#recomputeEdgesDebounced(this.#edgesList);
-  }
+  this.#recomputeEdgesDebounced(this.#edgesList);
+}
+
 }.bind(this));
+
+
+// DEMO: LiU-exakt 10×10 fönster (Bresenham, ordnade OD-par)
+this.#buildDroneMap("liu-window", { size: 10 });
+console.log('[DroneMap] requested mode = liu-window (10x10 demo)');
+
+
 
 
 
@@ -461,7 +646,7 @@ let airGeoJSONLayer = L.geoJSON(this.#population, {
         btn.addEventListener('click', () => this.#buildDroneMap());
     }
 
-
+    
     /**
     * onMapDoubleClick method:
     *   A double click on the map calls this function, which creates
@@ -901,81 +1086,89 @@ const watchdog = setTimeout(() => {
     *  - relativhastighet ~ 1.2 * egenhastighet (enkelt antagande)
     *  - uppdaterar segmentens två blå kolumner och totals
     */
- #computeDroneRisk() {
+
+
+#computeDroneRisk() {
+  console.log('[N] computeDroneRisk N =', this.getN());
+
   if (this.#ongoingComputation < 1) this.#showSpinner();
   this.#ongoingComputation++;
 
   try {
-    const sliderLambda = Math.max(0, this.getOtherUavDensity()); // UAV/km²
-    const R = Math.max(1, this.#NMAC_radius);                    // m
-    const Vrel = this.#v_UA * 1.2;
-    
-    // Om densiteten är noll: nolla alla NMAC-värden och skriv ut tabellen direkt
-if (sliderLambda === 0) {
-  let totalTime = 0;
-  for (let edge of this.#edgesList) {
-    const segTime = edge.length / this.#v_UA;
-    totalTime += segTime;
+    // Måste ha λ̄(g) för alla celler
+    const haveLambda =
+      Array.isArray(this.#lambdaBarValues) &&
+      this.#lambdaBarValues.length === this.#population.features.length;
 
-    edge.NMAC_rate = 0;
-    edge.expectedNMAC = 0;
-    this.#addSegmentRow(edge);
-  }
-  this.#totalNMAC_rate = 0;
-  this.#totalExpectedNMAC = 0;
-  this.#totalMissionDuration = totalTime;
+    if (!haveLambda) {
+      // Nollställ snyggt tills λ̄(g) finns
+      let totalTime = 0;
+      for (let edge of this.#edgesList) {
+        const segTime = edge.length / this.#v_UA;
+        totalTime += segTime;
+        edge.NMAC_rate = 0;
+        edge.expectedNMAC = 0;
+        this.#addSegmentRow(edge);
+      }
+      this.#totalNMAC_rate = 0;
+      this.#totalExpectedNMAC = 0;
+      this.#totalMissionDuration = totalTime;
+      return;
+    }
 
-  this.#ongoingComputation = Math.max(0, this.#ongoingComputation - 1);
-  this.#computeTotalStatistics(); // skriver totals oavsett spinner
-  return;
-}
-// m/s
+    const R    = Math.max(1, this.#NMAC_radius); // m
+    const Vrel = this.#v_UA * 1.2;               // m/s (enkelt antagande)
 
     let totalMissionNmac = 0;
     let totalTime = 0;
 
-    const haveDroneMap =
-      Array.isArray(this.#droneMapValues) &&
-      this.#droneMapValues.length === this.#population.features.length &&
-      this.#droneMapMean > 0;
-
     for (let edge of this.#edgesList) {
-      const airG = Math.max(1, edge.airBufferArea);     // m²
-      const segTime = edge.length / this.#v_UA;         // s
-      let lambdaEdge = sliderLambda;                    // UAV/km² (fallback)
+      const airG_m2 = Math.max(1, edge.airBufferArea);
+      const segTime = edge.length / this.#v_UA;
 
-      if (haveDroneMap && this.#rtreeData) {
-        try {
-          const ids = Helpers.treeBboxIntersect([edge.airBuffer], this.#rtreeData) || [];
-          let num = 0, den = 0;
-          for (const id of ids) {
-            const feat = this.#population.features[id];
-            const inter = turf.intersect(edge.airBuffer, feat);
-            if (!inter) continue;
-            const a = turf.area(inter); if (!(a > 0)) continue;
+      // Area-vägd Λ_edge (UAV/km²) från λ̄(g)
+      let num = 0, den = 0;
+      try {
+        const ids = Helpers.treeBboxIntersect([edge.airBuffer], this.#rtreeData) || [];
+        for (const id of ids) {
+          const cell = this.#population.features[id];
+          const inter = turf.intersect(edge.airBuffer, cell);
+          if (!inter) continue;
 
-            const m_i = this.#droneMapValues[id] || 0;
-            const lambda_i = (m_i > 0) ? (sliderLambda * (m_i / this.#droneMapMean)) : 0;
+          const a_m2 = turf.area(inter);
+          if (!(a_m2 > 0)) continue;
 
-            num += lambda_i * a;
-            den += a;
-          }
-          if (den > 0) {
-            const local = num / den;
-            if (local > 0) lambdaEdge = local;
-          }
-        } catch (e) {
-          console.warn('Drone risk: fallback to uniform density', e);
+          const Ai_m2   = turf.area(cell); // cellens area (m²)
+          if (!(Ai_m2 > 0)) continue;
+
+          const m_i = this.#droneMapValues[id] || 0;
+if (!(m_i > 0)) continue;
+
+const l     = this.#lMeters || 100;
+const T     = 12 * 3600;
+const sumD  = this.#sumDWindow || 1;
+const scale = (l / this.#v_UA) / (T * sumD * sumD);
+
+// λ̄_i med aktuellt N
+const lambda_i = this.getN() * m_i * scale;   // UAV per cell under T
+const Lambda_i = lambda_i / (Ai_m2 / 1e6);    // UAV/km²
+
+
+          num += Lambda_i * a_m2;
+          den += a_m2;
         }
+      } catch (e) {
+        console.warn('Drone risk (LiU): corridor aggregation failed, using zero for this edge', e);
       }
 
-      // Intensitet (NMAC/s): λ [UAV/km²] * area [km²] * (Vrel / (2R))
-      const areaKm2  = airG / 1e6;
+      const lambdaEdge = den > 0 ? (num / den) : 0; // UAV/km² (area-vägd)
+      const areaKm2    = airG_m2 / 1e6;
+
+      // Hazard per sekund
       const ratePerSec = lambdaEdge * areaKm2 * (Vrel / (2 * R));
 
-      // Sätt direkt på segmentet (inga extra "T_equiv"-varv)
-      edge.NMAC_rate    = Math.ceil(ratePerSec * 3600 * 1e6); // per 10^6 flight hours
-      edge.expectedNMAC = ratePerSec * segTime;               // NMAC för segmentet
+      edge.NMAC_rate    = Math.ceil(ratePerSec * 3600 * 1e6); // per 10^6 flygtimmar
+      edge.expectedNMAC = ratePerSec * segTime;
 
       totalMissionNmac += edge.expectedNMAC;
       totalTime        += segTime;
@@ -989,7 +1182,7 @@ if (sliderLambda === 0) {
     this.#totalMissionDuration = totalTime;
 
   } catch (err) {
-    console.error('computeDroneRisk failed:', err);
+    console.error('computeDroneRisk (LiU) failed:', err);
   } finally {
     this.#ongoingComputation = Math.max(0, this.#ongoingComputation - 1);
     this.#computeTotalStatistics();
@@ -1281,64 +1474,63 @@ if (this.#droneMode) {
     * onGlobalAltitudeSliderChange method:
     */
     #onGlobalAltitudeSliderChange(values, handle) {
-        let newAltitude = values[handle];
-        let affectedEdges = [];
+  let newAltitude = Math.floor(values[handle]);
+  if (this.#edgesList.length === 0) {
+    this.#rectangleWidth = newAltitude;
+    return;
+  }
 
-        for (let edge of this.#edgesList) {
-            if (!edge.altitudeManuallyChanged) {
-                edge.altitude = Math.floor(newAltitude);
-                edge.nodesList[0].altitudeUpdatedGlobally(newAltitude);
-                affectedEdges.push(edge);
-            }
-        }
-        affectedEdges.map((edge) => edge.update())
-
-        let lastSegment = this.#edgesList[this.#edgesList.length-1];
-        if (!lastSegment.altitudeManuallyChanged) {
-            lastSegment.nodesList[1].altitudeUpdatedGlobally(newAltitude);
-            lastSegment.update()
-        }
-
-        this.#updateBuffersUnion("ground");
-        this.#recomputeEdgesDebounced(affectedEdges);
+  let affectedEdges = [];
+  for (let edge of this.#edgesList) {
+    if (!edge.altitudeManuallyChanged) {
+      edge.altitude = newAltitude;
+      edge.nodesList[0].altitudeUpdatedGlobally(newAltitude);
+      affectedEdges.push(edge);
     }
+  }
+  affectedEdges.map((edge) => edge.update());
 
-    /**
-    * NEW: initializeOtherUavDensitySlider
-    */
-    #initializeOtherUavDensitySlider() {
-        this.#otherUavDensitySlider = document.getElementById('other-uav-density-slider');
-        if (!this.#otherUavDensitySlider) return;
+  const lastSegment = this.#edgesList[this.#edgesList.length - 1];
+  if (lastSegment && !lastSegment.altitudeManuallyChanged) {
+    lastSegment.nodesList[1].altitudeUpdatedGlobally(newAltitude);
+    lastSegment.update();
+  }
 
-        if (!this.#otherUavDensitySlider.noUiSlider) {
-            noUiSlider.create(this.#otherUavDensitySlider, {
-                start: [0],
-                step: 0.1,
-                connect: 'lower',
-                tooltips: {
-                    to: (value) => Number(value).toFixed(1),
-                },
-                range: {
-                    'min': [0],
-                    'max': [5]
-                },
-            });
-        }
-       // Kör alltid Drone-risk direkt – lätt beräkning och oberoende av lager/worker-status
-const recomputeDrone = () => { if (this.#droneMode) this.#computeDroneRisk(); };
-this.#otherUavDensitySlider.noUiSlider.on('change', recomputeDrone);
-this.#otherUavDensitySlider.noUiSlider.on('update', recomputeDrone);
+  this.#updateBuffersUnion("ground");
+  this.#recomputeEdgesDebounced(affectedEdges);
+}
 
 
-    }
+
 
     /**
     * Getter för densitetsvärdet (UAV/km²).
     */
-    getOtherUavDensity() {
-        if (!this.#otherUavDensitySlider || !this.#otherUavDensitySlider.noUiSlider) return 0;
-        return parseFloat(this.#otherUavDensitySlider.noUiSlider.get());
-    }
+    #initializeNSlider() {
+  this.#Nslider = document.getElementById('uav-N-slider');
+  if (!this.#Nslider) return;
+
+  if (!this.#Nslider.noUiSlider) {
+    noUiSlider.create(this.#Nslider, {
+      start: [100],            // valfritt startvärde
+      step: 10,
+      connect: 'lower',
+      tooltips: { to: (v) => Math.round(v) },
+      range: { 'min': [0], 'max': [100000] }
+    });
+  }
+  const recompute = () => { if (this.#droneMode) this.#computeDroneRisk(); };
+this.#Nslider.noUiSlider.on('change', recompute);
+this.#Nslider.noUiSlider.on('update', recompute);
+
+
+}
+
+getN() {
+  if (!this.#Nslider || !this.#Nslider.noUiSlider) return 0;
+  return Math.max(0, Math.floor(this.#Nslider.noUiSlider.get()));
+}
+
 
     #initializeSegmentExtensionCheckbox() {
         this.#segmentsExtensionCheckbox.addEventListener('change', this.#onSegmentExtensionCheckboxChange.bind(this));
