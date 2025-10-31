@@ -1117,7 +1117,7 @@ const watchdog = setTimeout(() => {
     }
 
     const R    = Math.max(1, this.#NMAC_radius); // m
-    const Vrel = this.#v_UA * 1.2;               // m/s (enkelt antagande)
+    const Vrel = this.#v_UA * 1.273;   // båda drönarna flyger med samma fart och slumpade riktningar, relativ hastigeht
 
     let totalMissionNmac = 0;
     let totalTime = 0;
