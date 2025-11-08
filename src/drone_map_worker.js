@@ -24,6 +24,18 @@ const m = new Float64Array(polys.length); // m(g)
   const allowedSet = allowedIds ? new Set(allowedIds) : null;
   const targetAllowed = restrictTargets && allowedSet;
 
+function sendPreview(done, total) {
+  // Skicka en KOPIA – m används vidare i workern
+  try {
+    self.postMessage({
+      type: 'preview',
+      mValues: Array.from(m),
+      meta: { sumDWindow, lMeters },
+      done, total,
+      pct: Math.round((done / (total || 1)) * 100)
+    });
+  } catch (_) { /* tyst – preview är "best effort" */ }
+}
 
 
   // Cachea cellpolygoner som Turf-Features för snabb bool-intersect
@@ -195,6 +207,8 @@ if (mode === "liu-window") {
 
   const n = cells.length;
   const totalPairs = n * (n - 1) / 2;
+  const previewEvery = Math.max(1, Math.floor(totalPairs / 50)); // ≈ var 2%
+
   let done = 0;
   const logEvery = Math.max(1, Math.floor(totalPairs / 100));
 
@@ -205,6 +219,8 @@ if (mode === "liu-window") {
       const b = cells[bi];
       addPair(a, b);
       done++;
+      if (done % previewEvery === 0) sendPreview(done, totalPairs);
+
       if (done % logEvery === 0) {
         self.postMessage({ type: "progress", done, total: totalPairs, pct: Math.round((done / totalPairs) * 100) });
       }
@@ -212,6 +228,8 @@ if (mode === "liu-window") {
   }
 
   self.postMessage({ type: "progress", done: totalPairs, total: totalPairs, pct: 100 });
+  sendPreview(totalPairs, totalPairs);
+
   self.postMessage({
     type: "result",
     mValues: Array.from(m),
@@ -312,6 +330,8 @@ self.postMessage({
 } else {
   // FULL: alla par inom filtret
   const totalPairs = (nEff * (nEff - 1)) / 2;
+  const previewEvery = Math.max(1, Math.floor(totalPairs / 50)); // ~var 2%
+
   let done = 0;
   const every = Math.max(1, Math.floor(totalPairs / 100));
 
@@ -320,6 +340,8 @@ self.postMessage({
     for (let j = i + 1; j < nEff; j++) {
       addPair(a, sample[j]);
       done++;
+      if (done % previewEvery === 0) sendPreview(done, totalPairs);
+
       if (done % every === 0) {
         self.postMessage({ type: "progress", done, total: totalPairs, pct: Math.round((done/totalPairs)*100) });
       }

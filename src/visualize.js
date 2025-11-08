@@ -25,7 +25,7 @@ import * as Objects from './objects.js';
 import * as Helpers from './helpers.js';
 
 let dataUrls = {
-    "nk_area": "./data/population_nk.geojson",
+    "nk_area": "./data/population_nk_fixed3.geojson",
     "stockholm_area": "./data/population_stockholm.geojson",
     "ockero_area": "./data/population_ockero.geojson",
     "vastervik_area": "./data/population_vastervik.geojson"
