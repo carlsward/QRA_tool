@@ -25,7 +25,7 @@ import * as Objects from './objects.js';
 import * as Helpers from './helpers.js';
 
 let dataUrls = {
-    "nk_area": "./data/population_nk_fixed3.geojson",
+    "nk_area": "./data/population_nk.geojson",
     "stockholm_area": "./data/population_stockholm.geojson",
     "ockero_area": "./data/population_ockero.geojson",
     "vastervik_area": "./data/population_vastervik.geojson"
@@ -232,48 +232,63 @@ class Visualization {
     }
 
 
-    #prepareGridIndexFromPopulation() {
+#prepareGridIndexFromPopulation() {
   const feats = this.#population.features;
 
-  // 1) Centroid för varje ruta
-  const cents = feats.map((f, idx) => {
-    const c = turf.centroid(f).geometry.coordinates; // [lon, lat]
-    return { idx, lon: c[0], lat: c[1], pop: f.properties.B || 0 };
+  // 1) bbox + typisk cellstorlek
+  const boxes = feats.map(f => {
+    const bb = turf.bbox(f);               // [minX, minY, maxX, maxY]
+    return { bb, dx: bb[2]-bb[0], dy: bb[3]-bb[1] };
+  });
+  const med = a => { const s = a.filter(x=>x>0).sort((x,y)=>x-y); return s[s.length>>1]; };
+  const dx = med(boxes.map(o=>o.dx));
+  const dy = med(boxes.map(o=>o.dy));
+  const minX0 = Math.min(...boxes.map(o=>o.bb[0]));
+  const minY0 = Math.min(...boxes.map(o=>o.bb[1]));
+
+  // 2) r/c från kvantiserad centroid
+  const cells = feats.map((f, id) => {
+    const [lon, lat] = turf.centroid(f).geometry.coordinates;
+    const r = Math.round((lat - minY0) / dy);
+    const c = Math.round((lon - minX0) / dx);
+    return { id, r, c, lon, lat, pop: Number(f.properties?.B || 0) };
   });
 
-  // 2) Diskretisera till rader/kolumner via unika lat/lon
-  const round = (x) => +x.toFixed(6);
-  const uniq = (arr) => Array.from(new Set(arr.map(round))).sort((a,b)=>a-b);
-
-  const lons = uniq(cents.map(o => o.lon));
-  const lats = uniq(cents.map(o => o.lat));
-  const lon2c = new Map(lons.map((x,i)=>[x,i]));
-  const lat2r = new Map(lats.map((x,i)=>[x,i]));
-
-  // 3) Cell-objekt + lookup tabell
-  const cells = cents.map(o => {
-    const r = lat2r.get(round(o.lat));
-    const c = lon2c.get(round(o.lon));
-    return { id: o.idx, r, c, pop: o.pop };
-  });
-
+  // 3) lookup-tabeller
   const idByRC = {};
   for (const cell of cells) idByRC[`${cell.r}|${cell.c}`] = cell.id;
 
-  // 4) Geometrier i samma indexordning som features
+  const maxR = Math.max(...cells.map(o=>o.r));
+  const maxC = Math.max(...cells.map(o=>o.c));
+  const lats = Array.from({length: maxR+1}, (_,r)=>minY0 + r*dy);
+  const lons = Array.from({length: maxC+1}, (_,c)=>minX0 + c*dx);
+
   const polys = feats.map(f => f.geometry);
-// DEBUG: hur ser "griden" ut?
-window.__gridInfo = { 
-  nFeatures: feats.length, 
-  nRows: lats.length, 
-  nCols: lons.length 
-};
-console.log('[Grid]', 'features=', feats.length, 'rows=', lats.length, 'cols=', lons.length);
 
+  window.__gridInfo = { nFeatures: feats.length, nRows: lats.length, nCols: lons.length, dx, dy };
+  console.log('[Grid]', window.__gridInfo);
   return { cells, idByRC, lats, lons, polys };
-
-  
 }
+
+#windowIdsSquareByCenter(K, cells, idByRC) {
+  const ctr = this.#map.getCenter(); // {lat,lng}
+  // närmaste cell till centrum
+  let seed = cells[0], best = Infinity;
+  for (const c of cells) {
+    const d = (c.lat-ctr.lat)**2 + (c.lon-ctr.lng)**2;
+    if (d < best) { best = d; seed = c; }
+  }
+  const half = Math.floor(K/2);
+  const ids = [];
+  for (let dr=-half; dr<=half; dr++) {
+    for (let dc=-half; dc<=half; dc++) {
+      const id = idByRC[`${seed.r+dr}|${seed.c+dc}`];
+      if (id !== undefined) ids.push(id);
+    }
+  }
+  return ids;
+}
+
 
 #windowIdsByRadiusKm(km = 3) {
   // Hämta centrum och skapa en cirkel (WGS84)
@@ -342,6 +357,24 @@ console.log('[Grid]', 'features=', feats.length, 'rows=', lats.length, 'cols=', 
   return bestI;
 }
 
+#debugPrintGrid(label, cellsArray, valueOf) {
+  if (!cellsArray || !cellsArray.length) { console.warn(label, '(tom)'); return; }
+  const rMin = Math.min(...cellsArray.map(c => c.r));
+  const rMax = Math.max(...cellsArray.map(c => c.r));
+  const cMin = Math.min(...cellsArray.map(c => c.c));
+  const cMax = Math.max(...cellsArray.map(c => c.c));
+
+  console.group(label, `(r:${rMin}-${rMax}, c:${cMin}-${cMax})`);
+  for (let r = rMin; r <= rMax; r++) {
+    const row = [];
+    for (let c = cMin; c <= cMax; c++) {
+      const cell = cellsArray.find(x => x.r === r && x.c === c);
+      row.push(cell ? valueOf(cell) : null);
+    }
+    console.log(row);        // rad för rad
+  }
+  console.groupEnd();
+}
 
 
 #buildDroneMap(mode = "sample") {
@@ -375,31 +408,22 @@ console.log('[Grid]', 'features=', feats.length, 'rows=', lats.length, 'cols=', 
 
 // --- Bygg LiU-fönster (K närmaste celler kring centrum) ---
 let filteredCells = cells;
+let windowCells = [];
 
 if (mode === "liu-window") {
-  const want = (opts.size || 10) * (opts.size || 10); // t.ex. 10x10 = 100
-  const center = this.#map.getCenter(); // { lat, lng }
+  const K = opts.size || 10;
+  const ids = this.#windowIdsSquareByCenter(K, cells, idByRC);
+  filteredCells = ids.map(id => cells.find(c => c.id === id)).filter(Boolean);
+  console.log('[DroneMap] liu-window square', {K, n: filteredCells.length});
+windowCells = filteredCells.slice();
+this.#debugPrintGrid('[DEBUG] BEFORE D(g) – rå befolkning', windowCells, c => c.pop);
 
-  // Avstånd i lat/lon-rum (räcker för urvalet); mappa cell -> (d², pop)
-  const ranked = cells.map(c => {
-    const lat = lats[c.r], lon = lons[c.c];
-    const d2 = (lat - center.lat) * (lat - center.lat) + (lon - center.lng) * (lon - center.lng);
-    return { cell: c, d2, pop: c.pop || 0 };
-  });
-
-  // Prioritera befolkade celler runt centrum
-  ranked.sort((a, b) => {
-    if ((b.pop > 0) !== (a.pop > 0)) return (b.pop > 0) ? 1 : -1; // pop>0 först
-    return a.d2 - b.d2;
-  });
-
-  filteredCells = ranked.slice(0, want).map(x => x.cell);
-
-  console.log('[DroneMap] liu-window (convex hull, nearest K)', {
-    size: opts.size || 10,
-    cellsInWindow: filteredCells.length
-  });
 }
+
+
+
+
+
 
 
   if (this.#ongoingComputation < 1) this.#showSpinner();
@@ -449,6 +473,11 @@ allowedIds,
       const factor = (l / v) / (T * sumD * sumD);
       const lambdaBar = this.#droneMapValues.map(m_i => N * m_i * factor);
       this.#lambdaBarValues = lambdaBar;   // ← spara λ̄(g) för risk-beräkningen
+if (windowCells.length) {
+  this.#debugPrintGrid('[DEBUG] AFTER m(g)', windowCells, c => this.#droneMapValues[c.id] ?? 0);
+  this.#debugPrintGrid('[DEBUG] AFTER lambdaBar', windowCells, c => this.#lambdaBarValues[c.id] ?? 0);
+}
+
 
 
       const styled = JSON.parse(JSON.stringify(this.#population));
@@ -607,7 +636,7 @@ let airGeoJSONLayer = L.geoJSON(this.#population, {
 
 
 // DEMO: LiU-exakt 10×10 fönster (Bresenham, ordnade OD-par)
-this.#buildDroneMap("liu-window", { size: 10 });
+this.#buildDroneMap("liu-window", { size: 3 });
 console.log('[DroneMap] requested mode = liu-window (10x10 demo)');
 
 
